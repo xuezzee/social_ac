@@ -5,6 +5,7 @@ import random
 
 import matplotlib.pyplot as plt
 import numpy as np
+import cv2
 #from ray.rllib.env import MultiAgentEnv
 
 ACTIONS = {'MOVE_LEFT': [-1, 0],  # Move left
@@ -78,6 +79,7 @@ class MapEnv():
         # map without agents or beams
         self.world_map = np.full((len(self.base_map), len(self.base_map[0])), ' ')
         self.beam_pos = []
+        self.i = 0
 
         self.agents = {}
 
@@ -323,10 +325,14 @@ class MapEnv():
                 to disk at this location.
         """
         map_with_agents = self.get_map_with_agents()
+        filename = '/Users/xue/Desktop/temp/%d.jpg'%self.i
+        self.i+=1
 
-        self._render(map_with_agents)
-        # rgb_arr = self.map_to_colors(map_with_agents)
+        # self._render(map_with_agents)
+        rgb_arr = self.map_to_colors(map_with_agents)
         # plt.imshow(rgb_arr, interpolation='nearest')
+        # rgb_arr = cv2.resize(rgb_arr,(450,625),interpolation=0)
+        cv2.imwrite(filename,rgb_arr)
         # if filename is None:
         #     plt.show(block=False)
         #     plt.pause(0.2)
