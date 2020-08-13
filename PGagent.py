@@ -6,7 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
-from network import Actor,Critic,CNN_preprocess,Centralised_Critic,ActorLaw
+import torch.multiprocessing as mp
+from network import Actor,Critic,CNN_preprocess,Centralised_Critic,ActorLaw, A3CNet
+from utils import v_wrap, set_init, push_and_pull, record
 import copy
 import itertools
 import random
@@ -171,3 +173,48 @@ class Centralised_AC(IAC):
 
     def update(self,s,r,s_,a,td_err):
         self.learnActor(a,td_err)
+
+
+class A3C(mp.Process):
+    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num=5):
+        super(A3C, self).__init__()
+        self.name = 'w%02i' % name
+        self.agent_num = agent_num
+        self.GAMMA = 0.9
+        self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
+        self.gnet, self.opt = global_net, optimizer
+        self.lnet = [A3CNet(state_dim, action_dim) for i in range(agent_num)]
+        self.env = env
+
+    def run(self):
+        total_step = 1
+        while self.g_ep.value < 100:
+            s = self.env.reset()
+            buffer_s, buffer_a, buffer_r = [], [], []
+            ep_r = [0. for i in range(self.agent_num)]
+            for ep in range(1000):
+                # print(ep)
+                if self.name == 'w00' and self.g_ep.value == 0:
+                    self.env.render()
+                a = [self.lnet[i].choose_action(v_wrap(s[i][None, :])) for i in range(self.agent_num)]
+                s_, r, done, _ = self.env.step(a,need_argmax=False)
+                # print(a)
+                # if done[0]: r = -1
+                ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
+                buffer_a.append(a)
+                buffer_s.append(s)
+                buffer_r.append(r)
+
+                if total_step % 5 == 0:  # update global and assign to local net
+                    # sync
+                    done = [False for i in range(self.agent_num)]
+                    [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],
+                                   s_[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i)
+                                                    for i in range(self.agent_num)]
+                    buffer_s, buffer_a, buffer_r = [], [], []
+                if ep == 999:  # done and print information
+                    record(self.g_ep, self.g_ep_r, sum(ep_r), self.res_queue, self.name)
+                    break
+                s = s_
+                total_step += 1
+        self.res_queue.put(None)

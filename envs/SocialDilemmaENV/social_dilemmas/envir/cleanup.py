@@ -1,5 +1,6 @@
 import numpy as np
 import random
+import tkinter
 
 from envs.SocialDilemmaENV.social_dilemmas.constants import CLEANUP_MAP
 from envs.SocialDilemmaENV.social_dilemmas.envir.map_env import MapEnv, ACTIONS
@@ -32,9 +33,11 @@ class CleanupEnv(MapEnv):
         unique, counts = np.unique(self.base_map, return_counts=True)
         counts_dict = dict(zip(unique, counts))
         self.potential_waste_area = counts_dict.get('H', 0) + counts_dict.get('R', 0)
-        self.current_apple_spawn_prob = appleRespawnProbability
+        self.appleRespawnProbability = appleRespawnProbability
+        self.current_apple_spawn_prob = self.appleRespawnProbability
         self.current_waste_spawn_prob = wasteSpawnProbability
         self.compute_probabilities()
+        self.root = None
 
         # make a list of the potential apple and waste spawn points
         self.apple_points = []
@@ -152,11 +155,11 @@ class CleanupEnv(MapEnv):
         else:
             self.current_waste_spawn_prob = wasteSpawnProbability
             if waste_density <= thresholdRestoration:
-                self.current_apple_spawn_prob = appleRespawnProbability
+                self.current_apple_spawn_prob = self.appleRespawnProbability
             else:
                 spawn_prob = (1 - (waste_density - thresholdRestoration)
                               / (thresholdDepletion - thresholdRestoration)) \
-                             * appleRespawnProbability
+                             * self.appleRespawnProbability
                 self.current_apple_spawn_prob = spawn_prob
 
     def compute_permitted_area(self):
@@ -166,3 +169,76 @@ class CleanupEnv(MapEnv):
         current_area = counts_dict.get('H', 0)
         free_area = self.potential_waste_area - current_area
         return free_area
+
+    def _close_view(self):
+        if self.root:
+            self.root.destory()
+            self.root = None
+            self.canvas = None
+        # self.done = True
+
+    def _render(self, map):
+        scale = 30
+        width = map.shape[0] * scale
+        height = map.shape[1] * scale
+        if self.root is None:
+            self.root = tkinter.Tk()
+            self.root.title("social_dilemmas")
+            self.root.protocol("WM_DELETE_WINDOW", self._close_view)
+            self.canvas = tkinter.Canvas(self.root, width=width, height=height)
+            self.canvas.pack()
+
+        self.canvas.delete(tkinter.ALL)
+        self.canvas.create_rectangle(0, 0, width, height, fill="black")
+
+        def fill_cell(x, y, color):
+            self.canvas.create_rectangle(
+                x * scale,
+                y * scale,
+                (x + 1) * scale,
+                (y + 1) * scale,
+                fill=color
+            )
+
+        for x in range(map.shape[0]):
+            for y in range(map.shape[1]):
+                if map[x,y] == '@':
+                    fill_cell(x,y,'Grey')
+                if map[x,y] == 'A':
+                    fill_cell(x,y,'Green')
+                if map[x,y] == '1':
+                    fill_cell(x,y,'Red')
+                if map[x,y] == '2':
+                    fill_cell(x,y,'Blue')
+                if map[x,y] == 'H':
+                    fill_cell(x,y,'Orange')
+                if map[x,y] == 'S':
+                    fill_cell(x,y,'Navy')
+                if map[x,y] == 'R':
+                    fill_cell(x,y,'Cyan')
+                if map[x,y] == 'F':
+                    fill_cell(x,y,'Yellow')
+                if map[x,y] == 'C':
+                    fill_cell(x,y,'Pink')
+                if map[x,y] == 'B':
+                    fill_cell(x,y,'Pink')
+                if map[x,y] == 'p':
+                    fill_cell(x,y,'Purple')
+                if map[x,y] == '3':
+                    fill_cell(x,y,'Magenta')
+                if map[x,y] == '4':
+                    fill_cell(x,y,'Lavender')
+                if map[x,y] == '5':
+                    fill_cell(x,y,'Purple')
+
+
+        self.root.update()
+
+    def setAppleRespawnRate(self, ep):
+        if self.appleRespawnProbability > 0.05:
+            if ep%20 == 0 and ep!=0:
+                self.appleRespawnProbability = self.appleRespawnProbability * 0.5
+            print(self.appleRespawnProbability)
+        else:
+            self.appleRespawnProbability = 0.05
+            print(self.appleRespawnProbability)
