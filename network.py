@@ -143,21 +143,21 @@ class A3CNet(nn.Module):
         self.distribution = torch.distributions.Categorical
 
     def forward(self, x):
-        pi1 = torch.tanh(self.pi1(x))
+        pi1 = torch.relu(self.pi1(x))
         logits = self.pi2(pi1)
-        v1 = torch.tanh(self.v1(x))
+        v1 = torch.relu(self.v1(x))
         values = self.v2(v1)
         return logits, values
 
     def choose_action(self, s):
-        # self.eval()
+        self.eval()
         logits, _ = self.forward(s)
         prob = F.softmax(logits, dim=1).data
         m = self.distribution(prob)
         return m.sample().numpy()[0]
 
     def loss_func(self, s, a, v_t):
-        # self.train()
+        self.train()
         logits, values = self.forward(s)
         td = v_t - values
         c_loss = td.pow(2)
