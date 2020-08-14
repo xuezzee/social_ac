@@ -8,8 +8,9 @@ from parallel_env_process import envs_dealer
 # from network import Centralised_Critic
 
 class env_wrapper():
-    def __init__(self,env):
+    def __init__(self,env,flatten=True):
         self.env = env
+        self.flatten = flatten
 
     def step(self,actions,need_argmax=True):
         def action_convert(action,need_argmax):
@@ -22,13 +23,19 @@ class env_wrapper():
                     act["agent-%d"%i] = action[i]
             return act
         n_state_, n_reward, done, info = self.env.step(action_convert(actions,need_argmax))
-        n_state_ = np.array([state.reshape(-1) for state in n_state_.values()])
+        if self.flatten:
+            n_state_ = np.array([state.reshape(-1) for state in n_state_.values()])
+        else:
+            n_state_ = np.array([state for state in n_state_.values])
         n_reward = np.array([reward for reward in n_reward.values()])
         return n_state_/255., n_reward, done, info
 
     def reset(self):
         n_state = self.env.reset()
-        return np.array([state.reshape(-1) for state in n_state.values()])/255.
+        if self.flatten:
+            return np.array([state.reshape(-1) for state in n_state.values()])/255.
+        else:
+            return np.array([state for state in n_state.values()])/255.
 
     def seed(self,seed):
         self.env.seed(seed)

@@ -33,7 +33,7 @@ parser.add_argument('--seed', type=int, default=543, metavar='N',
 parser.add_argument('--render', default=False, action='store_true',
                     help='render the environment')
 parser.add_argument('--log-interval', type=int, default=2, metavar='N',
-                    help='interval between training status logs (default: 10)')
+                    help='interval between training status logs0 (default: 10)')
 args = parser.parse_args()
 
 ##### env: gathering

@@ -131,16 +131,27 @@ class Centralised_Critic(nn.Module):
 
 
 class A3CNet(nn.Module):
-    def __init__(self, s_dim, a_dim):
+    def __init__(self, s_dim, a_dim, CNN=False):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.pi1 = nn.Linear(s_dim, 128)
-        self.pi2 = nn.Linear(128, a_dim)
-        self.v1 = nn.Linear(s_dim, 128)
-        self.v2 = nn.Linear(128, 1)
-        set_init([self.pi1, self.pi2, self.v1, self.v2])
-        self.distribution = torch.distributions.Categorical
+        if CNN:
+            self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+            self.pi1 = nn.Linear(1,32)
+            self.pi2 = nn.Linear(32,32)
+            self.LSTM = nn.LSTM(
+                input_size=32,
+                hidden_size=32,
+                num_layers=1,
+            )
+        else:
+            self.pi1 = nn.Linear(s_dim, 128)
+            self.pi2 = nn.Linear(128, a_dim)
+            self.v1 = nn.Linear(s_dim, 128)
+            self.v2 = nn.Linear(128, 1)
+            set_init([self.pi1, self.pi2, self.v1, self.v2])
+            self.distribution = torch.distributions.Categorical
+
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
@@ -149,12 +160,15 @@ class A3CNet(nn.Module):
         values = self.v2(v1)
         return logits, values
 
-    def choose_action(self, s):
+    def choose_action(self, s, dist=False):
         self.eval()
         logits, _ = self.forward(s)
         prob = F.softmax(logits, dim=1).data
         m = self.distribution(prob)
-        return m.sample().numpy()[0]
+        if not dist:
+            return m.sample().numpy()[0]
+        else:
+            return m.sample().numpy()[0], prob
 
     def loss_func(self, s, a, v_t):
         self.train()
