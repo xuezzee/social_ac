@@ -26,7 +26,7 @@ class env_wrapper():
         if self.flatten:
             n_state_ = np.array([state.reshape(-1) for state in n_state_.values()])
         else:
-            n_state_ = np.array([state for state in n_state_.values()])
+            n_state_ = np.array([state.reshape((-1,self.channel,self.width,self.height)) for state in n_state_.values()])
         n_reward = np.array([reward for reward in n_reward.values()])
         return n_state_/255., n_reward, done, info
 
@@ -35,7 +35,7 @@ class env_wrapper():
         if self.flatten:
             return np.array([state.reshape(-1) for state in n_state.values()])/255.
         else:
-            return np.array([state for state in n_state.values()])/255.
+            return np.array([state.reshape((-1,self.channel,self.width,self.height)) for state in n_state.values()])/255.
 
     def seed(self,seed):
         self.env.seed(seed)
@@ -45,7 +45,10 @@ class env_wrapper():
 
     @property
     def observation_space(self):
-        return Box(0., 1., shape=(675,), dtype=np.float32)
+        if self.flatten:
+            return Box(0., 1., shape=(675,), dtype=np.float32)
+        else:
+            return Box(0., 1., shape=(15,15,3), dtype=np.float32)
 
     @property
     def action_space(self):
@@ -54,6 +57,24 @@ class env_wrapper():
     @property
     def num_agents(self):
         return self.env.num_agents
+
+    @property
+    def width(self):
+        if not self.flatten:
+            return self.observation_space.shape[0]
+        else: return None
+
+    @property
+    def height(self):
+        if not self.flatten:
+            return self.observation_space.shape[1]
+        else: return None
+
+    @property
+    def channel(self):
+        if not  self.flatten:
+            return self.observation_space.shape[2]
+        else: return None
 
 def make_parallel_env(n_rollout_threads, seed):
     def get_env_fn(rank):
@@ -259,3 +280,135 @@ class Logger(object):
         summary = tf.Summary(value=[tf.Summary.Value(tag=tag, histo=hist)])
         self.writer.add_summary(summary, step)
         self.writer.flush()
+
+
+class Runner():
+    def __init__(self, env, n_agent, agents, episode=100, step=1000):
+        self.env = env_wrapper(env, flatten=False)
+        self.n_agent = n_agent
+        self.agents = agents
+        self.episode = episode
+        self.step = step
+        self.state_dim = 675
+        self.action_dim = 9
+
+    def run(self):
+        x_s = 0
+        ep = 0
+        while ep < self.episode:
+            # total_step = 1
+            state = self.env.reset()
+            buffer_s, buffer_a, buffer_r = [], [], []
+            ep_r = [0. for i in range(self.n_agent)]
+            for step in range(1, 1000):
+                # print(ep)
+                # if self.name == 'w00' and ep%10 == 0:
+                #     path = "/Users/xue/Desktop/temp/temp%d"%ep
+                #     if not os.path.exists(path):
+                #         os.mkdir(path)
+                #     self.env.render(path)
+                if step == 1:
+                    state0 = self.agents[0].CNN_preprocess(v_wrap(state[0]),"Actor")
+                    a0, prob0 = self.agents[0].choose_action(state0, True)
+                    a0_exe = [a0]
+                    a0 = self.one_hot(self.action_dim, a0)
+                    state = [torch.cat((self.agents[i].CNN_preprocess(v_wrap(state[i]),"Actor"), a0[None, None, :]), -1) for i in
+                         range(1, self.n_agent)]
+                    state = [state0] + state
+
+
+                actions = [self.agents[i].choose_action(state[i], True) for i in range(1, self.n_agent)]
+                prob = [elem[1] for elem in actions]
+                a_exe = a0_exe + [elem[0] for elem in actions]
+                # actions = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in actions]
+
+
+                state_, reward, done, _ = self.env.step(a_exe, need_argmax=False)
+
+
+                ep_r = [ep_r[i] + reward[i] for i in range(self.n_agent)]
+                x, _ = self._influencer_reward(reward[0], self.agents[1:], prob0, a0_exe, state[1:], prob, step)
+                reward = [float(i) for i in reward]
+                x_s += _.numpy()
+                reward[0] += x.detach().numpy()
+
+
+                state0_ = self.agents[0].CNN_preprocess(v_wrap(state_[0][None, :]), "Actor")
+                a0, prob0 = self.agents[0].choose_action(state0_, True)
+                a0_exe = [a0]
+                a0 = self.one_hot(self.action_dim, a0)
+                state_ = [torch.cat((self.agents[i].CNN_preprocess(v_wrap(state_[i][None, :]), "Actor"), a0[None, :]), -1)
+                         for i in range(1, self.n_agent)]
+                state_ = [state0_] + state_
+
+
+                for agent, s, a, r, s_ in zip(self.agents, state, a_exe, reward, state_):
+                    agent.update(s, r, s_, a)
+                # buffer_a.append(a_exe)
+                # buffer_s.append(s)
+                # buffer_r.append(r)
+
+                # if step % 5 == 0:  # update global and assign to local net
+                #     _s0 = self.lnet[0].CNN_preprocess(v_wrap(s_[None, :]))
+                #     a0 = self.lnet[0].choose_action(_s0, False)
+                #     a0 = self.one_hot(self.action_dim, a0)
+                #     _s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s_[i][None, :])), a0[None, :]), -1) for i in
+                #           range(1, self.agent_num)]
+                #     _s = [_s0] + _s
+                #     # sync
+                #     done = [False for i in range(self.agent_num)]
+                #     [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],
+                #                    _s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i)
+                #      for i in range(self.agent_num)]
+                #     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
+                #     buffer_s, buffer_a, buffer_r = [], [], []
+                state = state_
+                # total_step += 1
+            print('ep%d' % ep, self.name, sum(ep_r), x_s)
+            x_s = 0
+            ep += 1
+            if self.name == "w00" and self.multiProcess:
+                self.sender.send([sum(ep_r), ep])
+            if not self.multiProcess:
+                writer.scalar_summary("reward", sum(ep_r), ep)
+        if self.multiProcess:
+            self.res_queue.put(None)
+
+    def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
+        a_cf = []
+        for i in range(self.action_dim):
+            if i != a0[0]:
+                a_cf.append(i)
+        p_cf = []
+        s_cf = [torch.cat([torch.cat((s[i][:, :, :-self.action_dim], self.one_hot(self.action_dim, a_cf[j])[None, None, :]), -1)
+                           for j in range(self.action_dim)]) for i in range(self.n_agent - 1)]
+        for i in range(len(nets)):
+            temp = nets[i].choose_action(s_cf[i], True)[1]
+            _a = [temp[a_cf[j]] * prob0[0][a_cf[j]] for j in range(self.action_dim)]
+            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
+            _a = self._sum(_a) / torch.sum(self._sum(_a))
+            x = p_a[i][0]
+            y = _a.detach()
+            p_cf.append(torch.nn.functional.kl_div(torch.log(x), y, reduction="sum"))
+            # if step == 999:
+            #     print("p_a:",p_a[i][0], "cf_a:",y)
+            # print(self._sum(p_cf))
+            # l = scipy.stats.entropy(x.numpy(), y.numpy())
+        return 0.5 * e + 0.5 * self._sum(p_cf), self._sum(p_cf)
+
+    def _sum(self, tar):
+        sum = 0
+        for t in tar:
+            sum += t
+        return sum
+
+    def one_hot(self, dim, index, Tensor=True):
+        if Tensor:
+            one_hot = torch.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
+        else:
+            one_hot = np.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
+

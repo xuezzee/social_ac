@@ -4,10 +4,10 @@ import numpy as np
 import torch.multiprocessing as mp
 from envs.SocialDilemmaENV.social_dilemmas.envir.cleanup import CleanupEnv
 from envs.SocialDilemmaENV.social_dilemmas.envir.harvest import HarvestEnv
-from PGagent import A3C, SocialInfluence
+from PGagent import A3C, SocialInfluence, IAC_RNN
 from MAAC.algorithms.attention_sac import AttentionSAC
 from MAAC.utils.buffer import ReplayBuffer
-from utils import env_wrapper, make_parallel_env, Logger
+from utils import env_wrapper, make_parallel_env, Logger, Runner
 # from logger import Logger
 from network import A3CNet
 from torch.utils.tensorboard import SummaryWriter
@@ -32,7 +32,7 @@ args = parser.parse_args()
 # env.seed(args.seed)
 # torch.manual_seed(args.seed)
 
-agentParam = {"gamma": args.gamma, "LR": 1e-2, "device": device}
+agentParam = {"gamma": args.gamma, "LR": 1e-2, "device": device,"ifload":False,"filename": None}
 # agentParam =
 
 model_name = "pg_social"
@@ -99,5 +99,16 @@ def A3C_main():
     #     #     break
     # [w.join() for w in workers]
 
+def A2C_main():
+    n_agent = 5
+    env = CleanupEnv(num_agents=n_agent)
+    agent0 = [IAC_RNN(9, 675*2, agentParam, useLaw=False, useCenCritc=False, num_agent=n_agent, device=device,
+                      width=15, height=15, channel=3)]
+    agents = agent0 + [IAC_RNN(9, 675*2+9, agentParam, useLaw=False, useCenCritc=False, num_agent=n_agent, device=device,
+                      width=15, height=15, channel=3) for i in range(n_agent-1)]
+    runner = Runner(env, n_agent, agents)
+    runner.run()
+
 if __name__ == '__main__':
-    A3C_main_multiProcess()
+    # A3C_main_multiProcess()
+    A2C_main()
