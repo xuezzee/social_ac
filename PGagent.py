@@ -241,52 +241,57 @@ class SocialInfluence(mp.Process):
         self.sender = None
         self.name = 'w%02i' % name
         self.agent_num = agent_num
-        self.GAMMA = 0.9
+        self.GAMMA = 0.99
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
         self.lnet = [A3CNet(state_dim, action_dim)]
-        self.lnet = self.lnet + [A3CNet(state_dim+1, action_dim) for i in range(1, agent_num)]
+        self.lnet = self.lnet + [A3CNet(state_dim+action_dim, action_dim) for i in range(1, agent_num)]
         self.env = env
 
     def run(self):
+        x_s = 0
         ep = 0
         while self.g_ep.value < 100:
             # total_step = 1
             s = self.env.reset()
             buffer_s, buffer_a, buffer_r = [], [], []
             ep_r = [0. for i in range(self.agent_num)]
-            for step in range(1000):
+            for step in range(1, 1000):
                 # print(ep)
-                # if self.name == 'w00' and self.g_ep.value%10 == 0:
-                #     path = "/Users/xue/Desktop/temp/temp%d"%self.g_ep.value
-                #     if not os.path.exists(path):
-                #         os.mkdir(path)
-                #     self.env.render(path)
+                if self.name == 'w00' and ep%10 == 0:
+                    path = "/Users/xue/Desktop/temp/temp%d"%ep
+                    if not os.path.exists(path):
+                        os.mkdir(path)
+                    self.env.render(path)
                 s0 = s[0]
                 a0, prob0 = self.lnet[0].choose_action(v_wrap(s0[None, :]), True)
-                a0 = [a0]
-                s = [np.concatenate((s[i],np.array(a0)),-1) for i in range(1, self.agent_num)]
+                a0_exe = [a0]
+                # print(a0_exe)
+                a0 = self.one_hot(self.action_dim, a0)
+                s = [np.concatenate((s[i],a0),-1) for i in range(1, self.agent_num)]
                 s = [s0] + s
                 a = [self.lnet[i].choose_action(v_wrap(s[i][None, :]), True) for i in range(1, self.agent_num)]
                 prob = [elem[1] for elem in a]
-                a = a0 + [elem[0] for elem in a]
-                s_, r, done, _ = self.env.step(a,need_argmax=False)
+                a_exe = a0_exe + [elem[0] for elem in a]
+                a = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in a]
+                s_, r, done, _ = self.env.step(a_exe,need_argmax=False)
                 # print(a)
                 # if done[0]: r = -1
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
-                x = self._influencer_reward(r[0], self.lnet[1:], prob0, a0, s[1:], prob)
+                x,_ = self._influencer_reward(r[0], self.lnet[1:], prob0, a0_exe, s[1:], prob, step)
                 r = [float(i) for i in r]
-                r[0] += x.numpy()
-                buffer_a.append(a)
+                x_s += _.numpy()
+                r[0] += x.detach().numpy()
+                buffer_a.append(a_exe)
                 buffer_s.append(s)
                 buffer_r.append(r)
 
-                if step % 5 == 0 and step != 0:  # update global and assign to local net
+                if step % 5 == 0:  # update global and assign to local net
                     _s0 = s_[0]
                     a0 = self.lnet[0].choose_action(v_wrap(_s0[None, :]), False)
-                    a0 = [a0]
-                    _s = [np.concatenate((s_[i], np.array(a0)), -1) for i in range(1, self.agent_num)]
+                    a0 = self.one_hot(self.action_dim, a0)
+                    _s = [np.concatenate((s_[i], a0), -1) for i in range(1, self.agent_num)]
                     _s = [_s0] + _s
                     # sync
                     done = [False for i in range(self.agent_num)]
@@ -300,33 +305,42 @@ class SocialInfluence(mp.Process):
                 #     break
                 s = s_
                 # total_step += 1
-            print('ep%d'%ep, self.name, sum(ep_r))
+            print('ep%d'%ep, self.name, sum(ep_r), x_s)
+            x_s = 0
             ep+=1
             if self.name == "w00":
                 self.sender.send([sum(ep_r),ep])
         self.res_queue.put(None)
 
-    def _influencer_reward(self, e, nets, prob0, a0, s, p_a):
+    def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
         a_cf = []
         for i in range(self.action_dim):
-            if i != a0[0]:
-                a_cf.append(i)
+            # if i != a0[0]:
+            a_cf.append(i)
         p_cf = []
-        s_cf = np.array([[np.concatenate((s[i][ :-1],np.array([a_cf[j]])),-1) for j in range(self.action_dim-1)] for i in range(self.agent_num-1)])
+        s_cf = np.array([[np.concatenate((s[i][ :-self.action_dim],self.one_hot(self.action_dim, a_cf[j])),-1)
+                          for j in range(self.action_dim)] for i in range(self.agent_num-1)])
         for i in range(len(nets)):
-            # _a = [nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1] for i in range(self.agent_num-1)]
-            # temp = nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0]
-            _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0], prob0)]
-            # _a =
-            _a = torch.sum(_a[0],-2)
+            temp = nets[i].choose_action(v_wrap(s_cf[i][:, :]), True)[1]
+            _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim)]
+            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
+            _a = self._sum(_a)
             x = p_a[i][0]
             y = _a.detach()
             p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
+            # if step == 999:
+            #     print("p_a:",p_a[i][0], "cf_a:",y)
+            # print(self._sum(p_cf))
             # l = scipy.stats.entropy(x.numpy(), y.numpy())
-        return e + 50*self._sum(p_cf)/len(p_cf)
+        return 1.*e + 0.*self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
         sum = 0
         for t in tar:
             sum += t
         return sum
+
+    def one_hot(self, dim, index):
+        oh = np.zeros(dim)
+        oh[index] = 1.
+        return oh

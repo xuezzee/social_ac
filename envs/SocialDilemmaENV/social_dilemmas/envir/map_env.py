@@ -328,7 +328,7 @@ class MapEnv():
         filename = filename + '/%d.jpg'%self.i
         self.i+=1
 
-        self._render(map_with_agents)
+        # self._render(map_with_agents)
         rgb_arr = self.map_to_colors(map_with_agents)
         # plt.imshow(rgb_arr, interpolation='nearest')
         # rgb_arr = cv2.resize(rgb_arr,(450,625),interpolation=0)

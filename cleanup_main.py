@@ -39,7 +39,7 @@ model_name = "pg_social"
 file_name = "/Users/xue/Desktop/Social_Law/saved_weight/" + model_name
 save_eps = 10
 ifsave_model = True
-logger = Logger('./logs')
+logger = Logger('./logs1')
 
 
 def A3C_main():
@@ -49,13 +49,13 @@ def A3C_main():
     n_workers = 3
     sender, recevier = mp.Pipe()
     global_net = [A3CNet(675, 9)]
-    global_net = global_net + [A3CNet(676, 9) for i in range(n_agents-1)]
+    global_net = global_net + [A3CNet(675, 9) for i in range(n_agents-1)]
     optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.0001) for i in range(n_agents)]
-    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=1000000, gamma=0.9, last_epoch=-1) for i in range(n_agents)]
+    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=2000000, gamma=0.1, last_epoch=-1) for i in range(n_agents)]
     envs = [env_wrapper(CleanupEnv(num_agents=n_agents),flatten=True) for i in range(n_workers)]
-    # workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
-    workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents,
-                   scheduler_lr) for worker in range(n_workers)]
+    workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
+    # workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents,
+    #                scheduler_lr) for worker in range(n_workers)]
     workers[0].sender = sender
     for worker in workers:
         worker.start()
