@@ -26,7 +26,7 @@ class env_wrapper():
         if self.flatten:
             n_state_ = np.array([state.reshape(-1) for state in n_state_.values()])
         else:
-            n_state_ = np.array([state for state in n_state_.values])
+            n_state_ = np.array([state for state in n_state_.values()])
         n_reward = np.array([reward for reward in n_reward.values()])
         return n_state_/255., n_reward, done, info
 
@@ -140,22 +140,24 @@ def set_init(layers):
 
 
 def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
-    bs = [s[i] for s in bs]
+    bs = [s[i][0] for s in bs]
     ba = [a[i] for a in ba]
     br = [r[i] for r in br]
     if done:
         v_s_ = 0.               # terminal
     else:
-        v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+        # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+        v_s_ = lnet.forward(s_)[-1].data.numpy()[0, 0]
 
     buffer_v_target = []
     for r in br[::-1]:    # reverse buffer r
         v_s_ = r + gamma * v_s_
         buffer_v_target.append(v_s_)
     buffer_v_target.reverse()
-
+    # ca = v_wrap(np.vstack(bs))
+    ca = torch.stack(bs,0)
     loss = lnet.loss_func(
-        v_wrap(np.vstack(bs)),
+        ca,
         v_wrap(np.array(ba), dtype=np.int64) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba)),
         v_wrap(np.array(buffer_v_target)[:, None]))
 

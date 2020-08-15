@@ -135,23 +135,25 @@ class A3CNet(nn.Module):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        if CNN:
-            self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
-            self.pi1 = nn.Linear(1,32)
-            self.pi2 = nn.Linear(32,32)
-            self.LSTM = nn.LSTM(
-                input_size=32,
-                hidden_size=32,
-                num_layers=1,
-            )
-        else:
-            self.pi1 = nn.Linear(s_dim, 128)
-            self.pi2 = nn.Linear(128, a_dim)
-            self.v1 = nn.Linear(s_dim, 128)
-            self.v2 = nn.Linear(128, 1)
-            set_init([self.pi1, self.pi2, self.v1, self.v2])
-            self.distribution = torch.distributions.Categorical
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+        # self.pi1 = nn.Linear(1,32)
+        # self.pi2 = nn.Linear(32,32)
+        self.LSTM = nn.LSTM(
+            input_size=32,
+            hidden_size=32,
+            num_layers=1,
+        )
+        self.pi1 = nn.Linear(s_dim, 32)
+        self.pi2 = nn.Linear(32, a_dim)
+        self.v1 = nn.Linear(s_dim, 32)
+        self.v2 = nn.Linear(32, 1)
+        set_init([self.pi1, self.pi2, self.v1, self.v2])
+        self.distribution = torch.distributions.Categorical
 
+    def CNN_preprocess(self,x,width=15,height=15):
+        x = x.reshape(-1,3,width,height)
+        x = torch.relu(self.conv1(x))
+        return torch.flatten(x,1)
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))

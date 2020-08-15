@@ -39,23 +39,23 @@ model_name = "pg_social"
 file_name = "/Users/xue/Desktop/Social_Law/saved_weight/" + model_name
 save_eps = 10
 ifsave_model = True
-logger = Logger('./logs1')
+logger = Logger('./logs3')
 
 
-def A3C_main():
+def A3C_main_multiProcess():
     n_agents = 5
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
     n_workers = mp.cpu_count()
     n_workers = 3
     sender, recevier = mp.Pipe()
-    global_net = [A3CNet(675, 9)]
-    global_net = global_net + [A3CNet(675, 9) for i in range(n_agents-1)]
-    optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.0001) for i in range(n_agents)]
-    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=2000000, gamma=0.1, last_epoch=-1) for i in range(n_agents)]
-    envs = [env_wrapper(CleanupEnv(num_agents=n_agents),flatten=True) for i in range(n_workers)]
-    workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
-    # workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents,
-    #                scheduler_lr) for worker in range(n_workers)]
+    global_net = [A3CNet(675*2, 8)]
+    global_net = global_net + [A3CNet(675*2+8, 8) for i in range(n_agents-1)]
+    optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
+    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.8, last_epoch=-1) for i in range(n_agents)]
+    envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=True) for i in range(n_workers)]
+    # workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
+    workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 8, n_agents,
+                   scheduler_lr) for worker in range(n_workers)]
     workers[0].sender = sender
     for worker in workers:
         worker.start()
@@ -70,5 +70,34 @@ def A3C_main():
         #     break
     [w.join() for w in workers]
 
+def A3C_main():
+    n_agents = 5
+    global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
+    n_workers = mp.cpu_count()
+    n_workers = 1
+    # sender, recevier = mp.Pipe()
+    global_net = [A3CNet(675*2, 8)]
+    global_net = global_net + [A3CNet(675*2+8, 8) for i in range(n_agents-1)]
+    optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
+    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.8, last_epoch=-1) for i in range(n_agents)]
+    envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=True) for i in range(n_workers)]
+    # workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
+    workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 8, n_agents,
+                   scheduler_lr, False) for worker in range(n_workers)]
+    workers[0].run()
+    # workers[0].sender = sender
+    # for worker in workers:
+    #     worker.start()
+    # res = []
+    # while True:
+    #     msg = recevier.recv()
+    #     logger.scalar_summary("reward", msg[0], msg[1])
+    #     # r = res_queue.get()
+    #     # if r is not None:
+    #     #     res.append(r)
+    #     # else:
+    #     #     break
+    # [w.join() for w in workers]
+
 if __name__ == '__main__':
-    A3C_main()
+    A3C_main_multiProcess()

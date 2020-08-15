@@ -16,6 +16,7 @@ import torchsnooper
 import os
 import scipy.stats
 
+writer = Logger('./logsn')
 
 class IAC():
     def __init__(self,action_dim,state_dim,agentParam,useLaw,useCenCritc,num_agent,CNN=False, width=None, height=None, channel=None):
@@ -234,19 +235,21 @@ class A3C(mp.Process):
         self.res_queue.put(None)
 
 class SocialInfluence(mp.Process):
-    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr):
-        super(SocialInfluence, self).__init__()
+    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True):
+        if multiProcess:
+            super(SocialInfluence, self).__init__()
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.sender = None
         self.name = 'w%02i' % name
         self.agent_num = agent_num
+        self.multiProcess = multiProcess
         self.GAMMA = 0.99
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
-        self.lnet = [A3CNet(state_dim, action_dim)]
-        self.lnet = self.lnet + [A3CNet(state_dim+action_dim, action_dim) for i in range(1, agent_num)]
+        self.lnet = [A3CNet(state_dim*2, action_dim)]
+        self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim) for i in range(1, agent_num)]
         self.env = env
 
     def run(self):
@@ -259,19 +262,19 @@ class SocialInfluence(mp.Process):
             ep_r = [0. for i in range(self.agent_num)]
             for step in range(1, 1000):
                 # print(ep)
-                if self.name == 'w00' and ep%10 == 0:
-                    path = "/Users/xue/Desktop/temp/temp%d"%ep
-                    if not os.path.exists(path):
-                        os.mkdir(path)
-                    self.env.render(path)
-                s0 = s[0]
-                a0, prob0 = self.lnet[0].choose_action(v_wrap(s0[None, :]), True)
+                # if self.name == 'w00' and ep%10 == 0:
+                #     path = "/Users/xue/Desktop/temp/temp%d"%ep
+                #     if not os.path.exists(path):
+                #         os.mkdir(path)
+                #     self.env.render(path)
+                s0 = self.lnet[0].CNN_preprocess(v_wrap(s[0][None, :]))
+                a0, prob0 = self.lnet[0].choose_action(s0, True)
                 a0_exe = [a0]
                 # print(a0_exe)
                 a0 = self.one_hot(self.action_dim, a0)
-                s = [np.concatenate((s[i],a0),-1) for i in range(1, self.agent_num)]
+                s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s[i][None, :])),a0[None, :]),-1) for i in range(1, self.agent_num)]
                 s = [s0] + s
-                a = [self.lnet[i].choose_action(v_wrap(s[i][None, :]), True) for i in range(1, self.agent_num)]
+                a = [self.lnet[i].choose_action(s[i], True) for i in range(1, self.agent_num)]
                 prob = [elem[1] for elem in a]
                 a_exe = a0_exe + [elem[0] for elem in a]
                 a = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in a]
@@ -288,10 +291,10 @@ class SocialInfluence(mp.Process):
                 buffer_r.append(r)
 
                 if step % 5 == 0:  # update global and assign to local net
-                    _s0 = s_[0]
-                    a0 = self.lnet[0].choose_action(v_wrap(_s0[None, :]), False)
+                    _s0 = self.lnet[0].CNN_preprocess(v_wrap(s_[None, :]))
+                    a0 = self.lnet[0].choose_action(_s0, False)
                     a0 = self.one_hot(self.action_dim, a0)
-                    _s = [np.concatenate((s_[i], a0), -1) for i in range(1, self.agent_num)]
+                    _s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s_[i][None, :])),a0[None, :]),-1) for i in range(1, self.agent_num)]
                     _s = [_s0] + _s
                     # sync
                     done = [False for i in range(self.agent_num)]
@@ -300,31 +303,31 @@ class SocialInfluence(mp.Process):
                                                     for i in range(self.agent_num)]
                     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
                     buffer_s, buffer_a, buffer_r = [], [], []
-                # if ep == 999:  # done and print information
-                #     record(self.g_ep, self.g_ep_r, sum(ep_r), self.res_queue, self.name)
-                #     break
                 s = s_
                 # total_step += 1
             print('ep%d'%ep, self.name, sum(ep_r), x_s)
             x_s = 0
             ep+=1
-            if self.name == "w00":
+            if self.name == "w00" and self.multiProcess:
                 self.sender.send([sum(ep_r),ep])
-        self.res_queue.put(None)
+            if not self.multiProcess:
+                writer.scalar_summary("reward", sum(ep_r), ep)
+        if self.multiProcess:
+            self.res_queue.put(None)
 
     def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
         a_cf = []
         for i in range(self.action_dim):
-            # if i != a0[0]:
-            a_cf.append(i)
+            if i != a0[0]:
+                a_cf.append(i)
         p_cf = []
-        s_cf = np.array([[np.concatenate((s[i][ :-self.action_dim],self.one_hot(self.action_dim, a_cf[j])),-1)
-                          for j in range(self.action_dim)] for i in range(self.agent_num-1)])
+        s_cf = [torch.cat([torch.cat((s[i][:, :-self.action_dim],self.one_hot(self.action_dim, a_cf[j])[None, :]),-1)
+                          for j in range(self.action_dim-1)]) for i in range(self.agent_num-1)]
         for i in range(len(nets)):
-            temp = nets[i].choose_action(v_wrap(s_cf[i][:, :]), True)[1]
-            _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim)]
+            temp = nets[i].choose_action(s_cf[i], True)[1]
+            _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim-1)]
             # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
-            _a = self._sum(_a)
+            _a = self._sum(_a)/torch.sum(self._sum(_a))
             x = p_a[i][0]
             y = _a.detach()
             p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
@@ -332,7 +335,7 @@ class SocialInfluence(mp.Process):
             #     print("p_a:",p_a[i][0], "cf_a:",y)
             # print(self._sum(p_cf))
             # l = scipy.stats.entropy(x.numpy(), y.numpy())
-        return 1.*e + 0.*self._sum(p_cf), self._sum(p_cf)
+        return 0.5*e + 0.5*self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
         sum = 0
@@ -340,7 +343,12 @@ class SocialInfluence(mp.Process):
             sum += t
         return sum
 
-    def one_hot(self, dim, index):
-        oh = np.zeros(dim)
-        oh[index] = 1.
-        return oh
+    def one_hot(self, dim, index, Tensor=True):
+        if Tensor:
+            one_hot = torch.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
+        else:
+            one_hot = np.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
