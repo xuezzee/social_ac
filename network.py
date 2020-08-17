@@ -135,43 +135,30 @@ class A3CNet(nn.Module):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
-        # self.pi1 = nn.Linear(1,32)
-        # self.pi2 = nn.Linear(32,32)
-        self.LSTM_pi = nn.LSTM(
-            input_size=32,
-            hidden_size=32,
-            num_layers=1,
-        )
-        self.LSTM_v = nn.LSTM(
-            input_size=32,
-            hidden_size=32,
-            num_layers=1,
-        )
-        self.pi1 = nn.Linear(s_dim, 32)
-        self.pi2 = nn.Linear(32, 32)
-        self.pi3 = nn.Linear(32, a_dim)
-        self.v1 = nn.Linear(s_dim, 32)
-        self.v2 = nn.Linear(32, 32)
-        self.v3 = nn.Linear(32, 1)
-        set_init([self.pi1, self.pi2, self.v1, self.v2])
-        self.distribution = torch.distributions.Categorical
+        if CNN:
+            self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+            self.pi1 = nn.Linear(1,32)
+            self.pi2 = nn.Linear(32,32)
+            self.LSTM = nn.LSTM(
+                input_size=32,
+                hidden_size=32,
+                num_layers=1,
+            )
+        else:
+            self.pi1 = nn.Linear(s_dim, 128)
+            self.pi2 = nn.Linear(128, a_dim)
+            self.v1 = nn.Linear(s_dim, 128)
+            self.v2 = nn.Linear(128, 1)
+            set_init([self.pi1, self.pi2, self.v1, self.v2])
+            self.distribution = torch.distributions.Categorical
 
-    def CNN_preprocess(self,x,width=15,height=15):
-        x = x.reshape(-1,3,width,height)
-        x = torch.relu(self.conv1(x))
-        return torch.flatten(x,1)
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
-        pi2 = torch.relu(self.pi2(pi1))
-        logits, h_n = self.LSTM_pi(pi2)
-        logits = self.pi3(logits)
+        logits = self.pi2(pi1)
         v1 = torch.relu(self.v1(x))
-        v2 = torch.relu(self.v2(v1))
-        value = self.LSTM_v(v2)
-        value = self.v3(value)
-        return logits[:,-1,:], value[:,-1,:]
+        values = self.v2(v1)
+        return logits, values
 
     def choose_action(self, s, dist=False):
         self.eval()
@@ -202,14 +189,15 @@ class ActorRNN(nn.Module):
         self.CNN = CNN
         if CNN:
             self.Conv1 = nn.Conv2d(in_channels=3,out_channels=6,kernel_size=3,stride=1,padding=(1,1))
-            self.Linear1 = nn.Linear(state_dim, 32)
+            self.Linear_a = nn.Linear(action_dim, 32)
+            self.Linear1 = nn.Linear(state_dim*2, 32)
             self.Linear2 = nn.Linear(32, 32)
             self.LSTM = nn.LSTM(
                 input_size=32,
-                hidden_size=32,
+                hidden_size=128,
                 num_layers=1,
             )
-            self.out = nn.Linear(32,action_dim)
+            self.out = nn.Linear(128,action_dim)
         else:
             self.rnn = nn.GRU(
                 input_size=state_dim,
@@ -224,32 +212,41 @@ class ActorRNN(nn.Module):
         x = torch.flatten(x, start_dim=1,end_dim=-1).unsqueeze(0)
         return x
 
-    def forward(self,x):
+    def forward(self, x, a=None):
         # if self.CNN:
         #     x = self.Conv1(x)
         #     x = F.relu(x)
         #     x = torch.flatten(x,start_dim=1,end_dim=-1).unsqueeze(0)
+        x = self.CNN_preprocess(x)
         x = torch.relu(self.Linear1(x))
         x = torch.relu(self.Linear2(x))
+        x = x.reshape(-1,1,32)
+        if not isinstance(a, type(None)):
+            a = torch.relu(self.Linear_a(a))
+            a = a.reshape(-1,1,32)
+            x = x+a
         x, h_n = self.LSTM(x,None)
-        x = F.relu(x)
-        x = self.out(x)[:,-1,:]
+        x = F.relu(x[-1,:,:])
+        x = self.out(x)
         return F.softmax(x)
 
 class CriticRNN(nn.Module):
     def __init__(self,state_dim,action_dim,CNN=True):
         super(CriticRNN, self).__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self.CNN = CNN
         if CNN:
             self.Conv1 = nn.Conv2d(in_channels=3,out_channels=6,kernel_size=3,stride=1,padding=(1,1))
-            self.Linear1 = nn.Linear(state_dim, 32)
+            self.Linear_a = nn.Linear(action_dim, 32)
+            self.Linear1 = nn.Linear(state_dim*2, 32)
             self.Linear2 = nn.Linear(32, 32)
             self.LSTM = nn.LSTM(
                 input_size=32,
-                hidden_size=32,
+                hidden_size=128,
                 num_layers=1,
             )
-            self.out = nn.Linear(32,1)
+            self.out = nn.Linear(128,1)
         else:
             self.rnn = nn.GRU(
                 input_size=state_dim,
@@ -258,22 +255,29 @@ class CriticRNN(nn.Module):
             )
             self.out = nn.Linear(128,1)
 
-    def CNN_preprocess(self,x):
+    def CNN_preprocess(self, x):
+        if not isinstance(x, type(torch.Tensor())):
+            x = torch.Tensor(x)
         x = self.Conv1(x)
         x = torch.relu(x)
         x = torch.flatten(x, start_dim=1,end_dim=-1).unsqueeze(0)
         return x
 
-    def forward(self,x):
+    def forward(self, x, a=None):
         # if self.CNN:
         #     x = self.Conv1(x)
         #     x = F.relu(x)
         #     x = torch.flatten(x,start_dim=1,end_dim=-1).unsqueeze(0)
+        x = self.CNN_preprocess(x)
         x = torch.relu(self.Linear1(x))
         x = torch.relu(self.Linear2(x))
+        x = x.reshape(-1,1,32)
+        if not isinstance(a, type(None)):
+            a = torch.relu(self.Linear_a(a))
+            x = x+a
         x, h_n = self.LSTM(x,None)
-        x = F.relu(x)
-        x = self.out(x)[:,-1,:]
+        x = F.relu(x[-1,:,:])
+        x = self.out(x)
         return x
 
 if __name__ == "__main__":

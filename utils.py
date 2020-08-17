@@ -4,6 +4,8 @@ from torch import nn
 from gym.spaces import Discrete, Box
 from envs.SocialDilemmaENV.social_dilemmas.envir.cleanup import CleanupEnv
 from parallel_env_process import envs_dealer
+import copy
+import ray
 # from PGagent import IAC, Centralised_AC, Law
 # from network import Centralised_Critic
 
@@ -161,24 +163,22 @@ def set_init(layers):
 
 
 def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
-    bs = [s[i][0] for s in bs]
+    bs = [s[i] for s in bs]
     ba = [a[i] for a in ba]
     br = [r[i] for r in br]
     if done:
         v_s_ = 0.               # terminal
     else:
-        # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
-        v_s_ = lnet.forward(s_)[-1].data.numpy()[0, 0]
+        v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
 
     buffer_v_target = []
     for r in br[::-1]:    # reverse buffer r
         v_s_ = r + gamma * v_s_
         buffer_v_target.append(v_s_)
     buffer_v_target.reverse()
-    # ca = v_wrap(np.vstack(bs))
-    ca = torch.stack(bs,0)
+
     loss = lnet.loss_func(
-        ca,
+        v_wrap(np.vstack(bs)),
         v_wrap(np.array(ba), dtype=np.int64) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba)),
         v_wrap(np.array(buffer_v_target)[:, None]))
 
@@ -283,24 +283,32 @@ class Logger(object):
 
 
 class Runner():
-    def __init__(self, env, n_agent, agents, episode=100, step=1000):
+    def __init__(self, env, n_agent, agents, episode=100, step=1000, logger=None):
         self.env = env_wrapper(env, flatten=False)
+        self.logger = logger
         self.n_agent = n_agent
         self.agents = agents
         self.episode = episode
         self.step = step
-        self.state_dim = 675
-        self.action_dim = 9
+        self.state_dim = agents[0].state_dim
+        self.action_dim = agents[0].action_dim
+        self.alpha = 0.15
 
     def run(self):
         x_s = 0
         ep = 0
         while ep < self.episode:
+            if self.alpha <= 0.4 and ep % 2==0:
+                self.alpha = self.alpha * 0.15
+            else:
+                self.alpha = 0.4
+            # self.env.env.setAppleRespawnRate(ep)
             # total_step = 1
             state = self.env.reset()
             buffer_s, buffer_a, buffer_r = [], [], []
             ep_r = [0. for i in range(self.n_agent)]
-            for step in range(1, 1000):
+            for step in range(1, 1001):
+                # print(step)
                 # print(ep)
                 # if self.name == 'w00' and ep%10 == 0:
                 #     path = "/Users/xue/Desktop/temp/temp%d"%ep
@@ -308,20 +316,22 @@ class Runner():
                 #         os.mkdir(path)
                 #     self.env.render(path)
                 if step == 1:
-                    state0 = self.agents[0].CNN_preprocess(v_wrap(state[0]),"Actor")
-                    a0, prob0 = self.agents[0].choose_action(state0, True)
+                    state_update = copy.deepcopy(state)
+                    a0, prob0 = self.agents[0].choose_action(state[0], True)
                     a0_exe = [a0]
                     a0 = self.one_hot(self.action_dim, a0)
-                    state = [torch.cat((self.agents[i].CNN_preprocess(v_wrap(state[i]),"Actor"), a0[None, None, :]), -1) for i in
-                         range(1, self.n_agent)]
-                    state = [state0] + state
-
-
-                actions = [self.agents[i].choose_action(state[i], True) for i in range(1, self.n_agent)]
+                else:
+                    a0, prob0 = self.agents[0].choose_action(state_[0], True)
+                    a0_exe = [a0]
+                    a0 = self.one_hot(self.action_dim, a0)
+                    state = state_
+                actions = [self.agents[i].choose_action(state[i], True, a0[None, None, :]) for i in range(1, self.n_agent)]
+                # actions = [self.agents[i].choose_action(state[i], True) for i in range(1, self.n_agent)]
                 prob = [elem[1] for elem in actions]
                 a_exe = a0_exe + [elem[0] for elem in actions]
                 # actions = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in actions]
 
+                self.env.render()
 
                 state_, reward, done, _ = self.env.step(a_exe, need_argmax=False)
 
@@ -329,20 +339,12 @@ class Runner():
                 ep_r = [ep_r[i] + reward[i] for i in range(self.n_agent)]
                 x, _ = self._influencer_reward(reward[0], self.agents[1:], prob0, a0_exe, state[1:], prob, step)
                 reward = [float(i) for i in reward]
-                x_s += _.numpy()
-                reward[0] += x.detach().numpy()
+                x_s += _
+                reward[0] += x
 
+                state_update_ = copy.deepcopy(state_)
 
-                state0_ = self.agents[0].CNN_preprocess(v_wrap(state_[0][None, :]), "Actor")
-                a0, prob0 = self.agents[0].choose_action(state0_, True)
-                a0_exe = [a0]
-                a0 = self.one_hot(self.action_dim, a0)
-                state_ = [torch.cat((self.agents[i].CNN_preprocess(v_wrap(state_[i][None, :]), "Actor"), a0[None, :]), -1)
-                         for i in range(1, self.n_agent)]
-                state_ = [state0_] + state_
-
-
-                for agent, s, a, r, s_ in zip(self.agents, state, a_exe, reward, state_):
+                for agent, s, a, r, s_ in zip(self.agents, state_update, a_exe, reward, state_update_):
                     agent.update(s, r, s_, a)
                 # buffer_a.append(a_exe)
                 # buffer_s.append(s)
@@ -362,39 +364,25 @@ class Runner():
                 #      for i in range(self.agent_num)]
                 #     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
                 #     buffer_s, buffer_a, buffer_r = [], [], []
-                state = state_
+                state_update = state_update_
                 # total_step += 1
-            print('ep%d' % ep, self.name, sum(ep_r), x_s)
+            print('ep%d' % ep, sum(ep_r), x_s)
+
+            if self.logger != None:
+                self.logger.scalar_summary("reward", sum(ep_r), ep)
+                self.logger.scalar_summary("influence reward", x_s, ep)
             x_s = 0
             ep += 1
-            if self.name == "w00" and self.multiProcess:
-                self.sender.send([sum(ep_r), ep])
-            if not self.multiProcess:
-                writer.scalar_summary("reward", sum(ep_r), ep)
-        if self.multiProcess:
-            self.res_queue.put(None)
 
-    def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
-        a_cf = []
-        for i in range(self.action_dim):
-            if i != a0[0]:
-                a_cf.append(i)
+    def _influencer_reward(self, e, nets, prob0, a0, state, p_a, step=0):
         p_cf = []
-        s_cf = [torch.cat([torch.cat((s[i][:, :, :-self.action_dim], self.one_hot(self.action_dim, a_cf[j])[None, None, :]), -1)
-                           for j in range(self.action_dim)]) for i in range(self.n_agent - 1)]
+        counter_actions = [self.one_hot(self.action_dim, i)[None, None, :] for i in range(self.action_dim)]
+        counter_actions.pop(a0[0])
         for i in range(len(nets)):
-            temp = nets[i].choose_action(s_cf[i], True)[1]
-            _a = [temp[a_cf[j]] * prob0[0][a_cf[j]] for j in range(self.action_dim)]
-            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
-            _a = self._sum(_a) / torch.sum(self._sum(_a))
+            y = nets[i].counterfactual(counter_actions)[0]
             x = p_a[i][0]
-            y = _a.detach()
-            p_cf.append(torch.nn.functional.kl_div(torch.log(x), y, reduction="sum"))
-            # if step == 999:
-            #     print("p_a:",p_a[i][0], "cf_a:",y)
-            # print(self._sum(p_cf))
-            # l = scipy.stats.entropy(x.numpy(), y.numpy())
-        return 0.5 * e + 0.5 * self._sum(p_cf), self._sum(p_cf)
+            p_cf.append(self.kl_div(x,y))
+        return (1-self.alpha) * e + (self.alpha) * self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
         sum = 0
@@ -412,3 +400,14 @@ class Runner():
             one_hot[index] = 1.
             return one_hot
 
+    def kl_div(self, p, q):
+        """Kullback-Leibler divergence D(P || Q) for discrete probability dists
+
+        Assumes the probability dist is over the last dimension.
+        Taken from: https://gist.github.com/swayson/86c296aa354a555536e6765bbe726ff7
+        p, q : array-like, dtype=float
+        """
+        p = np.asarray(p, dtype=np.float)
+        q = np.asarray(q, dtype=np.float)
+
+        return np.sum(np.where(p != 0, p * np.log(p / q), 0), axis=-1)

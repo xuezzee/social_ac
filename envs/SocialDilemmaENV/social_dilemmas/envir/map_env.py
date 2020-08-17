@@ -325,14 +325,16 @@ class MapEnv():
                 to disk at this location.
         """
         map_with_agents = self.get_map_with_agents()
-        filename = filename + '/%d.jpg'%self.i
-        self.i+=1
+        if filename == None:
+            self._render(map_with_agents)
+        else:
+            filename = filename + '/%d.jpg'%self.i
+            self.i+=1
 
-        # self._render(map_with_agents)
-        rgb_arr = self.map_to_colors(map_with_agents)
-        # plt.imshow(rgb_arr, interpolation='nearest')
-        # rgb_arr = cv2.resize(rgb_arr,(450,625),interpolation=0)
-        cv2.imwrite(filename,rgb_arr)
+            rgb_arr = self.map_to_colors(map_with_agents)
+            # plt.imshow(rgb_arr, interpolation='nearest')
+            # rgb_arr = cv2.resize(rgb_arr,(450,625),interpolation=0)
+            cv2.imwrite(filename,rgb_arr)
         # if filename is None:
         #     plt.show(block=False)
         #     plt.pause(0.2)

@@ -1,6 +1,5 @@
 import numpy as np
 from itertools import count
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -138,9 +137,9 @@ class IAC():
 
     def learnCritic(self, s, r, s_):
         td_err = self.cal_tderr(s, r, s_)
-        loss = torch.mul(td_err, td_err)
+        loss = torch.square(td_err)
         self.optimizerC.zero_grad()
-        loss.backward()
+        loss.backward(retain_graph=True)
         self.optimizerC.step()
         self.lr_scheduler["optC"].step()
 
@@ -148,10 +147,12 @@ class IAC():
     def learnActor(self, s, r, s_, a):
         td_err = self.cal_tderr(s, r, s_)
         m = torch.log(self.act_prob[0][a])
-        temp = m * td_err.detach()
+        td_err = td_err.detach()
+        temp = m * td_err[0][0]
         loss = -torch.mean(temp)
         self.optimizerA.zero_grad()
-        loss.backward()
+        with torch.autograd.set_detect_anomaly(True):
+            loss.backward(retain_graph=True)
         self.optimizerA.step()
         self.lr_scheduler["optA"].step()
 
@@ -162,7 +163,6 @@ class IAC():
     def update(self, s, r, s_, a):
         self.learnCritic(s, r, s_)
         self.learnActor(s, r, s_, a)
-
 
 class Centralised_AC(IAC):
     def __init__(self, action_dim, state_dim, agentParam, useLaw, useCenCritc, num_agent):
@@ -190,7 +190,6 @@ class Centralised_AC(IAC):
 
     def update(self, s, r, s_, a, td_err):
         self.learnActor(a, td_err)
-
 
 class A3C(mp.Process):
     def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim,
@@ -248,112 +247,97 @@ class A3C(mp.Process):
                 self.sender.send([sum(ep_r), ep])
         self.res_queue.put(None)
 
-
 class SocialInfluence(mp.Process):
-    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim,
-                 agent_num, scheduler_lr, multiProcess=True):
-        if multiProcess:
-            super(SocialInfluence, self).__init__()
+    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr):
+        super(SocialInfluence, self).__init__()
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.sender = None
         self.name = 'w%02i' % name
         self.agent_num = agent_num
-        self.multiProcess = multiProcess
-        self.GAMMA = 0.99
+        self.GAMMA = 0.9
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
-        self.lnet = [A3CNet(state_dim * 2, action_dim)]
-        self.lnet = self.lnet + [A3CNet(state_dim * 2 + action_dim, action_dim) for i in range(1, agent_num)]
+        self.lnet = [A3CNet(state_dim, action_dim)]
+        self.lnet = self.lnet + [A3CNet(state_dim+1, action_dim) for i in range(1, agent_num)]
         self.env = env
 
     def run(self):
-        x_s = 0
         ep = 0
         while self.g_ep.value < 100:
             # total_step = 1
             s = self.env.reset()
             buffer_s, buffer_a, buffer_r = [], [], []
             ep_r = [0. for i in range(self.agent_num)]
-            for step in range(1, 1000):
+            for step in range(1000):
                 # print(ep)
-                # if self.name == 'w00' and ep%10 == 0:
-                #     path = "/Users/xue/Desktop/temp/temp%d"%ep
+                # if self.name == 'w00' and self.g_ep.value%10 == 0:
+                #     path = "/Users/xue/Desktop/temp/temp%d"%self.g_ep.value
                 #     if not os.path.exists(path):
                 #         os.mkdir(path)
                 #     self.env.render(path)
-                s0 = self.lnet[0].CNN_preprocess(v_wrap(s[0][None, :]))
-                a0, prob0 = self.lnet[0].choose_action(s0, True)
-                a0_exe = [a0]
-                # print(a0_exe)
-                a0 = self.one_hot(self.action_dim, a0)
-                s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s[i][None, :])), a0[None, :]), -1) for i in
-                     range(1, self.agent_num)]
+                s0 = s[0]
+                a0, prob0 = self.lnet[0].choose_action(v_wrap(s0[None, :]), True)
+                a0 = [a0]
+                s = [np.concatenate((s[i],np.array(a0)),-1) for i in range(1, self.agent_num)]
                 s = [s0] + s
-                a = [self.lnet[i].choose_action(s[i], True) for i in range(1, self.agent_num)]
+                a = [self.lnet[i].choose_action(v_wrap(s[i][None, :]), True) for i in range(1, self.agent_num)]
                 prob = [elem[1] for elem in a]
-                a_exe = a0_exe + [elem[0] for elem in a]
-                a = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in a]
-                s_, r, done, _ = self.env.step(a_exe, need_argmax=False)
+                a = a0 + [elem[0] for elem in a]
+                s_, r, done, _ = self.env.step(a,need_argmax=False)
                 # print(a)
                 # if done[0]: r = -1
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
-                x, _ = self._influencer_reward(r[0], self.lnet[1:], prob0, a0_exe, s[1:], prob, step)
+                x = self._influencer_reward(r[0], self.lnet[1:], prob0, a0, s[1:], prob)
                 r = [float(i) for i in r]
-                x_s += _.numpy()
-                r[0] += x.detach().numpy()
-                buffer_a.append(a_exe)
+                r[0] += x.numpy()
+                buffer_a.append(a)
                 buffer_s.append(s)
                 buffer_r.append(r)
 
-                if step % 5 == 0:  # update global and assign to local net
-                    _s0 = self.lnet[0].CNN_preprocess(v_wrap(s_[None, :]))
-                    a0 = self.lnet[0].choose_action(_s0, False)
-                    a0 = self.one_hot(self.action_dim, a0)
-                    _s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s_[i][None, :])), a0[None, :]), -1) for i in
-                          range(1, self.agent_num)]
+                if step % 5 == 0 and step != 0:  # update global and assign to local net
+                    _s0 = s_[0]
+                    a0 = self.lnet[0].choose_action(v_wrap(_s0[None, :]), False)
+                    a0 = [a0]
+                    _s = [np.concatenate((s_[i], np.array(a0)), -1) for i in range(1, self.agent_num)]
                     _s = [_s0] + _s
                     # sync
                     done = [False for i in range(self.agent_num)]
                     [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],
                                    _s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i)
-                     for i in range(self.agent_num)]
+                                                    for i in range(self.agent_num)]
                     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
                     buffer_s, buffer_a, buffer_r = [], [], []
+                # if ep == 999:  # done and print information
+                #     record(self.g_ep, self.g_ep_r, sum(ep_r), self.res_queue, self.name)
+                #     break
                 s = s_
                 # total_step += 1
-            print('ep%d' % ep, self.name, sum(ep_r), x_s)
-            x_s = 0
-            ep += 1
-            if self.name == "w00" and self.multiProcess:
-                self.sender.send([sum(ep_r), ep])
-            if not self.multiProcess:
-                writer.scalar_summary("reward", sum(ep_r), ep)
-        if self.multiProcess:
-            self.res_queue.put(None)
+            print('ep%d'%ep, self.name, sum(ep_r))
+            ep+=1
+            if self.name == "w00":
+                self.sender.send([sum(ep_r),ep])
+        self.res_queue.put(None)
 
-    def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
+    def _influencer_reward(self, e, nets, prob0, a0, s, p_a):
         a_cf = []
         for i in range(self.action_dim):
             if i != a0[0]:
                 a_cf.append(i)
         p_cf = []
-        s_cf = [torch.cat([torch.cat((s[i][:, :-self.action_dim], self.one_hot(self.action_dim, a_cf[j])[None, :]), -1)
-                           for j in range(self.action_dim - 1)]) for i in range(self.agent_num - 1)]
+        s_cf = np.array([[np.concatenate((s[i][ :-1],np.array([a_cf[j]])),-1) for j in range(self.action_dim-1)] for i in range(self.agent_num-1)])
         for i in range(len(nets)):
-            temp = nets[i].choose_action(s_cf[i], True)[1]
-            _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim - 1)]
-            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
-            _a = self._sum(_a) / torch.sum(self._sum(_a))
+            # _a = [nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1] for i in range(self.agent_num-1)]
+            # temp = nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0]
+            _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0], prob0)]
+            # _a =
+            _a = torch.sum(_a[0],-2)
             x = p_a[i][0]
             y = _a.detach()
-            p_cf.append(torch.nn.functional.kl_div(torch.log(x), y, reduction="sum"))
-            # if step == 999:
-            #     print("p_a:",p_a[i][0], "cf_a:",y)
-            # print(self._sum(p_cf))
+            p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
             # l = scipy.stats.entropy(x.numpy(), y.numpy())
-        return 0.5 * e + 0.5 * self._sum(p_cf), self._sum(p_cf)
+        return e + 50*self._sum(p_cf)/len(p_cf)
 
     def _sum(self, tar):
         sum = 0
@@ -361,89 +345,131 @@ class SocialInfluence(mp.Process):
             sum += t
         return sum
 
-    def one_hot(self, dim, index, Tensor=True):
-        if Tensor:
-            one_hot = torch.zeros(dim)
-            one_hot[index] = 1.
-            return one_hot
-        else:
-            one_hot = np.zeros(dim)
-            one_hot[index] = 1.
-            return one_hot
-
 class IAC_RNN(IAC):
     '''
     This is the RNN version of Actor Crtic, in order to address the kind of problems where the temporal features are included
     '''
     def __init__(self,action_dim, state_dim, agentParam, useLaw, useCenCritc, num_agent, CNN=True, device='cpu', width=None,
-                 height=None, channel=None):
+                 height=None, channel=None, name=None):
         super().__init__(action_dim,state_dim, agentParam, useLaw, useCenCritc, num_agent)
+        self.name = name
         self.device = device
-        self.maxsize_queue = 5
+        self.maxsize_queue = 3
         self.CNN = CNN
-        self.queue = deque([torch.zeros(state_dim).reshape(1,1,1,state_dim) for i in range(self.maxsize_queue)])
-        self.queue_cf = deque([torch.zeros(state_dim).reshape(1,9,1,state_dim) for i in range(self.maxsize_queue)])
-        self.actor = ActorRNN(state_dim,action_dim,CNN)
-        self.critic = CriticRNN(state_dim,action_dim,CNN)
-        self.optimizerA = torch.optim.SGD(self.actor.parameters(),lr=0.001)
-        self.optimizerC = torch.optim.SGD(self.critic.parameters(),lr=0.001)
+        self.width = width
+        self.height = height
+        self.channel = channel
+        self.queue_s = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
+        self.queue_a = deque([torch.zeros(action_dim).reshape(1,1,action_dim) for i in range(self.maxsize_queue)])
+        self.queue_s_update = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
+        # self.queue_cf = deque([torch.zeros(state_dim).reshape(1,9,1,state_dim) for i in range(self.maxsize_queue)])
+        self.actor = ActorRNN(state_dim,action_dim,CNN).to(device)
+        self.critic = CriticRNN(state_dim,action_dim,CNN).to(device)
+        self.optimizerA = torch.optim.Adam(self.actor.parameters(),lr=0.0001)
+        self.optimizerC = torch.optim.Adam(self.critic.parameters(),lr=0.001)
+        self.lr_scheduler = {
+            "optA": torch.optim.lr_scheduler.StepLR(self.optimizerA, step_size=5000, gamma=0.8, last_epoch=-1),
+            "optC": torch.optim.lr_scheduler.StepLR(self.optimizerC, step_size=5000, gamma=0.8, last_epoch=-1)}
 
-    def collect_states(self,state):
-        self.queue.pop()
-        self.queue.insert(0,state)
+    def collect_states(self, state):
+        self.queue_s.pop()
+        self.queue_s.insert(0, state)
 
-    def choose_action(self,s,is_prob=False):
-        s = torch.Tensor(s).unsqueeze(0).to(self.device)
+    def collect_act_prob(self, action):
+        self.queue_a.pop()
+        self.queue_a.insert(0, action)
+
+    def collect_state_update(self, state):
+        self.queue_s_update.pop()
+        self.queue_s_update.insert(0, state)
+
+    def choose_action(self, s, is_prob=False, a=None):
+        s = torch.Tensor(s).to(self.device)
         self.collect_states(s)
-        self.queue.reverse()
-        self.act_prob = self.actor(torch.cat(list(self.queue)).reshape((1,-1,self.state_dim))) + torch.abs(
-                        torch.randn(self.action_dim) * 0. * self.constant_decay)
-        self.queue.reverse()
-        self.constant_decay = self.constant_decay*self.noise_epsilon
-        self.act_prob = self.act_prob/torch.sum(self.act_prob).detach()
-        # print(self.act_prob)
+        if not isinstance(a, type(None)):
+            a = torch.Tensor(a).to(self.device)
+            self.collect_act_prob(a)
+            self.queue_a.reverse()
+
+
+        self.queue_s.reverse()
+        if isinstance(a, type(None)):
+            self.act_prob = self.actor(torch.cat(list(self.queue_s)))
+        else:
+            self.act_prob = self.actor(torch.cat(list(self.queue_s)),
+                                       torch.cat(list(self.queue_a)).reshape((1, -1, self.action_dim)))
+            self.queue_a.reverse()
+        self.queue_s.reverse()
+
+
+        # self.constant_decay = self.constant_decay*self.noise_epsilon
+        # self.act_prob = self.act_prob/torch.sum(self.act_prob).detach()
+        # print(self.name, " choose_action:", self.act_prob)
         if is_prob:
             m = torch.distributions.Categorical(self.act_prob)
             m = m.sample()
-            return m.detach().numpy()[0], self.act_prob
+            return m.detach().numpy()[0], self.act_prob.detach()
         else:
             m = torch.distributions.Categorical(self.act_prob)
             m = m.sample()
-            return m.detach().numpy()[0]
+            return m.detach().cpu().numpy()[0]
 
-    def counterfactual(self,s):
-        s = torch.Tensor(s).unsqueeze(0).to(self.device)
-        self.collect_states(s)
-        self.queue.reverse()
-        self.act_prob = self.actor(torch.cat(list(self.queue)).reshape((1,-1,self.state_dim))) + torch.abs(
-                        torch.randn(self.action_dim) * 0. * self.constant_decay)
-        self.queue.reverse()
-        self.constant_decay = self.constant_decay*self.noise_epsilon
-        self.act_prob = self.act_prob/torch.sum(self.act_prob).detach()
+    def counterfactual(self, counter_act):
+        def change_counter_action(act_queue, counter_act):
+            act_queue[-1] = counter_act
+            return torch.cat(list(act_queue)).to(self.device)
+        self.queue_s.reverse()
+        action_queue_temp = copy.deepcopy(self.queue_a)
+        action_queue_temp.reverse()
+        # action_queue_temp = np.vstack(list(action_queue_temp))
+        act_prob = [self.actor(torch.cat(list(self.queue_s)).to(self.device),
+                               change_counter_action(action_queue_temp, act)) for act in counter_act]
+        self.queue_s.reverse()
+        act_prob = sum(act_prob)/len(counter_act)
+        # self.constant_decay = self.constant_decay*self.noise_epsilon
+        # self.act_prob = self.act_prob/torch.sum(self.act_prob).detach()
         # print(self.act_prob)
-        return self.act_prob
+        return act_prob.cpu().detach()
 
-    def cal_tderr(self,s,r,s_):
-        s = torch.Tensor(s).unsqueeze(0).to(self.device)
-        s_ = torch.Tensor(s_).unsqueeze(0).to(self.device)
-        temp_q = copy.deepcopy(self.queue)
+    def cal_tderr(self, s, r, s_):
+        s_ = torch.Tensor(s_).to(self.device)
+        temp_q = copy.deepcopy(self.queue_s_update)
         temp_q.pop()
         temp_q.insert(0,s_)
         temp_q.reverse()
-        if self.CNN:
-            v_ = self.critic(torch.cat(list(temp_q)).reshape((-1,3,15,15))).detach()
-            self.queue.reverse()
-            v = self.critic(torch.cat(list(self.queue)).reshape(-1,3,15,15))
-            self.queue.reverse()
-        else:
-            v_ = self.critic(torch.cat(list(temp_q)).reshape((1,-1,self.state_dim))).detach()
-            self.queue.reverse()
-            v = self.critic(torch.cat(list(self.queue)).reshape(1,-1,self.state_dim))
-            self.queue.reverse()
+        # queue_s_update = self.CNN_preprocess(torch.cat(list(self.queue_s_update)), A_or_C="Critic")
+        # temp_q = self.CNN_preprocess(torch.cat(list(temp_q)), A_or_C="Critic")
+        v_ = self.critic(torch.cat(list(temp_q))).detach()
+        self.queue_s_update.reverse()
+        v = self.critic(torch.cat(list(self.queue_s_update)))
+        self.queue_s_update.reverse()
         return r + 0.99*v_ - v
 
-    def CNN_preprocess(self,x,A_or_c):
-        if A_or_c == 'Actor':
-            return self.actor.CNN_preprocess(x)
-        else:
-            return self.critic.CNN_preprocess(x)
+    def update(self, s, r, s_, a):
+        s = torch.Tensor(s).to(self.device)
+        self.collect_state_update(s)
+        td_err = self.learnCritic(s, r, s_)
+        self.learnActor(s, r, s_, a, td_err)
+
+    def learnCritic(self, s, r, s_):
+        td_err = self.cal_tderr(s, r, s_)
+        loss = torch.square(td_err)
+        self.optimizerC.zero_grad()
+        loss.backward()
+        self.optimizerC.step()
+        self.lr_scheduler["optC"].step()
+        return  td_err.detach()
+
+    # @torchsnooper.snoop()
+    def learnActor(self, s, r, s_, a, td_err):
+        # print(self.name, " learnActor:", self.act_prob)
+        # td_err = self.cal_tderr(s, r, s_)
+        m = torch.log(self.act_prob[0][a])
+        td_err = td_err
+        temp = m * td_err[0][0]
+        loss = -torch.mean(temp)
+        self.optimizerA.zero_grad()
+        with torch.autograd.set_detect_anomaly(True):
+            loss.backward()
+        self.optimizerA.step()
+        self.lr_scheduler["optA"].step()
