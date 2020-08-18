@@ -104,7 +104,7 @@ def A2C_main():
     # state_dim = env.observation_space
     agents = [IAC_RNN(9, 675, agentParam, useLaw=False, useCenCritc=False, num_agent=n_agent, device=device,
                       width=15, height=15, channel=3, name="agent%d"%i) for i in range(n_agent)]
-    runner = Runner(env, n_agent, agents, logger=logger)
+    runner = Runner(env, n_agent, agents, logger=None)
     runner.run()
 
 if __name__ == '__main__':

@@ -371,6 +371,10 @@ class Runner():
             if self.logger != None:
                 self.logger.scalar_summary("reward", sum(ep_r), ep)
                 self.logger.scalar_summary("influence reward", x_s, ep)
+            if ep % 2 == 0:
+                for agent in self.agents:
+                    if agent.temperature > 0.001: agent.temperature = agent.temperature * 0.5
+                    else: agent.temperature = 0.001
             x_s = 0
             ep += 1
 

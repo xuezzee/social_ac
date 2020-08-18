@@ -194,10 +194,10 @@ class ActorRNN(nn.Module):
             self.Linear2 = nn.Linear(32, 32)
             self.LSTM = nn.LSTM(
                 input_size=32,
-                hidden_size=128,
+                hidden_size=32,
                 num_layers=1,
             )
-            self.out = nn.Linear(128,action_dim)
+            self.out = nn.Linear(32,action_dim)
         else:
             self.rnn = nn.GRU(
                 input_size=state_dim,
@@ -243,10 +243,10 @@ class CriticRNN(nn.Module):
             self.Linear2 = nn.Linear(32, 32)
             self.LSTM = nn.LSTM(
                 input_size=32,
-                hidden_size=128,
+                hidden_size=32,
                 num_layers=1,
             )
-            self.out = nn.Linear(128,1)
+            self.out = nn.Linear(32,1)
         else:
             self.rnn = nn.GRU(
                 input_size=state_dim,

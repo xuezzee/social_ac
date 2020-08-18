@@ -359,17 +359,18 @@ class IAC_RNN(IAC):
         self.width = width
         self.height = height
         self.channel = channel
+        self.temperature = 0.1
         self.queue_s = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
         self.queue_a = deque([torch.zeros(action_dim).reshape(1,1,action_dim) for i in range(self.maxsize_queue)])
         self.queue_s_update = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
         # self.queue_cf = deque([torch.zeros(state_dim).reshape(1,9,1,state_dim) for i in range(self.maxsize_queue)])
         self.actor = ActorRNN(state_dim,action_dim,CNN).to(device)
         self.critic = CriticRNN(state_dim,action_dim,CNN).to(device)
-        self.optimizerA = torch.optim.Adam(self.actor.parameters(),lr=0.0001)
+        self.optimizerA = torch.optim.Adam(self.actor.parameters(),lr=0.001)
         self.optimizerC = torch.optim.Adam(self.critic.parameters(),lr=0.001)
         self.lr_scheduler = {
-            "optA": torch.optim.lr_scheduler.StepLR(self.optimizerA, step_size=5000, gamma=0.8, last_epoch=-1),
-            "optC": torch.optim.lr_scheduler.StepLR(self.optimizerC, step_size=5000, gamma=0.8, last_epoch=-1)}
+            "optA": torch.optim.lr_scheduler.StepLR(self.optimizerA, step_size=10000, gamma=0.8, last_epoch=-1),
+            "optC": torch.optim.lr_scheduler.StepLR(self.optimizerC, step_size=10000, gamma=0.8, last_epoch=-1)}
 
     def collect_states(self, state):
         self.queue_s.pop()
@@ -462,11 +463,16 @@ class IAC_RNN(IAC):
 
     # @torchsnooper.snoop()
     def learnActor(self, s, r, s_, a, td_err):
+        def entropy(prob):
+            entropy = 0
+            for p in prob[0]:
+                entropy -= p*torch.log(p)
+            return entropy
         # print(self.name, " learnActor:", self.act_prob)
         # td_err = self.cal_tderr(s, r, s_)
         m = torch.log(self.act_prob[0][a])
         td_err = td_err
-        temp = m * td_err[0][0]
+        temp = m * (td_err[0][0] + self.temperature * entropy(self.act_prob))
         loss = -torch.mean(temp)
         self.optimizerA.zero_grad()
         with torch.autograd.set_detect_anomaly(True):
