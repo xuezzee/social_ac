@@ -7,10 +7,11 @@ import torch.optim as optim
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
 from network import Actor, Critic, CNN_preprocess, Centralised_Critic, ActorLaw, A3CNet, CriticRNN, ActorRNN
-from utils import v_wrap, set_init, push_and_pull, record, Logger
+from utils import v_wrap, set_init, push_and_pull, record, Logger, categorical_sample
 import copy
 import itertools
 from collections import deque
+from shared_adam import SharedAdam
 import random
 import torchsnooper
 import os
@@ -359,18 +360,18 @@ class IAC_RNN(IAC):
         self.width = width
         self.height = height
         self.channel = channel
-        self.temperature = 0.1
-        self.queue_s = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
-        self.queue_a = deque([torch.zeros(action_dim).reshape(1,1,action_dim) for i in range(self.maxsize_queue)])
-        self.queue_s_update = deque([torch.zeros(state_dim).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
+        self.temperature = 0.001
+        self.queue_s = deque([torch.zeros(state_dim).to(device).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
+        self.queue_a = deque([torch.zeros(action_dim).to(device).reshape(1,1,action_dim) for i in range(self.maxsize_queue)])
+        self.queue_s_update = deque([torch.zeros(state_dim).to(device).reshape(1,channel,width,height) for i in range(self.maxsize_queue)])
         # self.queue_cf = deque([torch.zeros(state_dim).reshape(1,9,1,state_dim) for i in range(self.maxsize_queue)])
         self.actor = ActorRNN(state_dim,action_dim,CNN).to(device)
         self.critic = CriticRNN(state_dim,action_dim,CNN).to(device)
         self.optimizerA = torch.optim.Adam(self.actor.parameters(),lr=0.001)
         self.optimizerC = torch.optim.Adam(self.critic.parameters(),lr=0.001)
         self.lr_scheduler = {
-            "optA": torch.optim.lr_scheduler.StepLR(self.optimizerA, step_size=10000, gamma=0.8, last_epoch=-1),
-            "optC": torch.optim.lr_scheduler.StepLR(self.optimizerC, step_size=10000, gamma=0.8, last_epoch=-1)}
+            "optA": torch.optim.lr_scheduler.StepLR(self.optimizerA, step_size=20000, gamma=0.9, last_epoch=-1),
+            "optC": torch.optim.lr_scheduler.StepLR(self.optimizerC, step_size=20000, gamma=0.9, last_epoch=-1)}
 
     def collect_states(self, state):
         self.queue_s.pop()
@@ -395,10 +396,10 @@ class IAC_RNN(IAC):
 
         self.queue_s.reverse()
         if isinstance(a, type(None)):
-            self.act_prob = self.actor(torch.cat(list(self.queue_s)))
+            self.act_prob = self.actor(torch.cat(list(self.queue_s)).to(self.device))
         else:
-            self.act_prob = self.actor(torch.cat(list(self.queue_s)),
-                                       torch.cat(list(self.queue_a)).reshape((1, -1, self.action_dim)))
+            self.act_prob = self.actor(torch.cat(list(self.queue_s)).to(self.device),
+                                       torch.cat(list(self.queue_a)).to(self.device).reshape((1, -1, self.action_dim)))
             self.queue_a.reverse()
         self.queue_s.reverse()
 
@@ -409,15 +410,15 @@ class IAC_RNN(IAC):
         if is_prob:
             m = torch.distributions.Categorical(self.act_prob)
             m = m.sample()
-            return m.detach().numpy()[0], self.act_prob.detach()
+            return m.cpu().detach().numpy()[0], self.act_prob.detach()
         else:
             m = torch.distributions.Categorical(self.act_prob)
             m = m.sample()
             return m.detach().cpu().numpy()[0]
 
-    def counterfactual(self, counter_act):
+    def counterfactual(self, counter_act, counter_prob):
         def change_counter_action(act_queue, counter_act):
-            act_queue[-1] = counter_act
+            act_queue[-1] = counter_act.to(self.device)
             return torch.cat(list(act_queue)).to(self.device)
         self.queue_s.reverse()
         action_queue_temp = copy.deepcopy(self.queue_a)
@@ -425,11 +426,11 @@ class IAC_RNN(IAC):
         # action_queue_temp = np.vstack(list(action_queue_temp))
         act_prob = [self.actor(torch.cat(list(self.queue_s)).to(self.device),
                                change_counter_action(action_queue_temp, act)) for act in counter_act]
+        act_prob = [act_prob[i] * counter_prob[i] for i in range(self.action_dim-1)]
         self.queue_s.reverse()
-        act_prob = sum(act_prob)/len(counter_act)
-        # self.constant_decay = self.constant_decay*self.noise_epsilon
-        # self.act_prob = self.act_prob/torch.sum(self.act_prob).detach()
-        # print(self.act_prob)
+        act_prob = sum(act_prob)
+        # act_prob = sum(act_prob)/len(counter_act)
+        act_prob = act_prob / sum(act_prob[0])
         return act_prob.cpu().detach()
 
     def cal_tderr(self, s, r, s_):
@@ -440,9 +441,9 @@ class IAC_RNN(IAC):
         temp_q.reverse()
         # queue_s_update = self.CNN_preprocess(torch.cat(list(self.queue_s_update)), A_or_C="Critic")
         # temp_q = self.CNN_preprocess(torch.cat(list(temp_q)), A_or_C="Critic")
-        v_ = self.critic(torch.cat(list(temp_q))).detach()
+        v_ = self.critic(torch.cat(list(temp_q)).to(self.device)).detach()
         self.queue_s_update.reverse()
-        v = self.critic(torch.cat(list(self.queue_s_update)))
+        v = self.critic(torch.cat(list(self.queue_s_update)).to(self.device))
         self.queue_s_update.reverse()
         return r + 0.99*v_ - v
 
@@ -467,15 +468,79 @@ class IAC_RNN(IAC):
             entropy = 0
             for p in prob[0]:
                 entropy -= p*torch.log(p)
-            return entropy
+            return entropy.to(self.device)
         # print(self.name, " learnActor:", self.act_prob)
         # td_err = self.cal_tderr(s, r, s_)
         m = torch.log(self.act_prob[0][a])
         td_err = td_err
-        temp = m * (td_err[0][0] + self.temperature * entropy(self.act_prob))
+        temp = m * (td_err[0][0]) + self.temperature * entropy(self.act_prob)
         loss = -torch.mean(temp)
         self.optimizerA.zero_grad()
         with torch.autograd.set_detect_anomaly(True):
             loss.backward()
         self.optimizerA.step()
         self.lr_scheduler["optA"].step()
+
+
+class influence_A3C():
+    def __init__(self, obs_dim, act_dim, lr, agents, obs_type="RGB", width=None, height=None, channel=None, lr_scheduler=False, influencer_num=1):
+        self.agents = agents
+        self.agent_num = len(agents)
+        self.influencer_num = influencer_num
+        self.lr_scheduler = lr_scheduler
+        self.action = act_dim
+        self.obs_type = obs_type
+        if obs_type == "RGB":self.width = width; self.height = height; self.channel = channel
+        self.obs_dim = obs_dim
+        for i in range(self.agent_num):
+            self.agents[i].optimizer = SharedAdam(self.agents[i].parameters(), lr=lr, betas=(0.92,0.99))            #optimizer和scheduler放在agent（network）了
+            if lr_scheduler:self.agents[i].lr_scheduler = torch.optim.lr_scheduler.StepLR(self.agents[i].optimizer, #SharedAdam是莫烦A3C中实现的optimizer，好像是用来同时更新两个网络的，细节不太懂
+                                                                                          step_size=10000,
+                                                                                          gamma=0.9,
+                                                                                          last_epoch=-1)
+
+
+    def choose_influencer_action(self, observations):                               #选择influencer的action， 直接放obs
+        influencer_act_logists = []
+        influencer_act_prob = []
+        influencer_act_int = []
+        influencer_act_onehot = []
+        for agent, obs in zip(self.agents[:self.influencer_num], observations[:self.influencer_num]):
+            prob, logist = agent.choose_action(obs)
+            int_act, act = categorical_sample(prob)                                 #MAAC里的函数直接那过来的， 放入probability distribution, 返回int型动作和 onehot 动作
+            influencer_act_logists.append(logist)
+            influencer_act_prob.append(prob)
+            influencer_act_onehot.append(act)
+            influencer_act_int.append(int_act)
+        return influencer_act_onehot, influencer_act_prob, influencer_act_int, influencer_act_logists
+
+
+    def choose_action(self, observations, influencer_action):                       #使用obs和influencer的动作作为输入
+        influencee_logist = []
+        influencee_onehot = []
+        for agent, obs, inf_act in zip(self.agents[self.influencer_num:],
+                                       observations[self.influencer_num:],
+                                       influencer_action[self.influencer_num:]):
+            prob, logist = agent.choose_action(obs, inf_act)                        #具体见network中A3CAgent
+            int_act, act = categorical_sample(prob)
+            influencee_logist.append(logist)
+            influencee_onehot.append(act)
+        return influencee_onehot, influencee_logist
+
+
+    def update(self, samples):                                                      #两个网络同时更新，不确定是否管用
+        for agent, sample in zip(self.agents, samples):
+            loss = agent.loss(sample)
+            agent.optimizer.zero_grad()
+            loss.backward()
+            agent.optimizer.step()
+            if self.lr_scheduler:
+                agent.lr_scheduler.step()
+
+
+
+
+
+
+
+

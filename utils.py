@@ -9,6 +9,16 @@ import ray
 # from PGagent import IAC, Centralised_AC, Law
 # from network import Centralised_Critic
 
+def make_parallel_env(n_rollout_threads, make_env, flatten, seed = 3):
+    def get_env_fn(rank):
+        def init_env():
+            env = env_wrapper(make_env[0](num_agents=make_env[1]), flatten=False)
+            # env.seed(seed + rank * 1000)
+            np.random.seed(seed + rank * 1000)
+            return env
+        return init_env()
+    return envs_dealer([get_env_fn(i) for i in range(n_rollout_threads)])
+
 class env_wrapper():
     def __init__(self,env,flatten=True):
         self.env = env
@@ -78,17 +88,6 @@ class env_wrapper():
             return self.observation_space.shape[2]
         else: return None
 
-def make_parallel_env(n_rollout_threads, seed):
-    def get_env_fn(rank):
-        def init_env():
-            env = env_wrapper(CleanupEnv(num_agents=4))
-            # env.seed(seed + rank * 1000)
-            np.random.seed(seed + rank * 1000)
-            return env
-        return init_env()
-    return envs_dealer([get_env_fn(i) for i in range(n_rollout_threads)])
-
-
 class Agents():
     def __init__(self,agents,exploration=0.5):
         self.num_agent = len(agents)
@@ -120,47 +119,15 @@ class Agents():
         for i, ag in zip(range(self.num_agent), self.agents):
             torch.save(ag.policy, file_name + "pg" + str(i) + ".pth")
 
-# class Social_Agents():
-#     def __init__(self,agents,agentParam):
-#         self.Law = social_agent(agentParam)
-#         self.agents = agents
-#         self.n_agents = len(agents)
-#
-#     def select_masked_actions(self, state):
-#         actions = []
-#         for i, ag in zip(range(self.n_agents), self.agents):
-#             masks, prob_mask = self.Law.select_action(state[i])
-#             self.Law.prob_social.append(prob_mask)  # prob_social is the list of masks for each agent
-#             pron_mask_copy = prob_mask  # deepcopy(prob_mask)
-#             action, prob_indi = ag.select_masked_action(state[i], pron_mask_copy)
-#             self.Law.pi_step.append(prob_indi)  # pi_step is the list of unmasked policy(prob ditribution) for each agent
-#             actions.append(action)
-#         return actions
-#
-#     def update(self, state, reward, state_, action):
-#         for agent, s, r, s_,a in zip(self.agents, state, reward, state_, action):
-#             agent.update(s,r,s_,a)
-#
-#     def update_law(self):
-#         self.Law.update(self.n_agents)
-#
-#     def push_reward(self, reward):
-#         for i, ag in zip(range(self.n_agents), self.agents):
-#             ag.rewards.append(reward[i])
-#         self.Law.rewards.append(sum(reward))
-
-
 def v_wrap(np_array, dtype=np.float32):
     if np_array.dtype != dtype:
         np_array = np_array.astype(dtype)
     return torch.from_numpy(np_array)
 
-
 def set_init(layers):
     for layer in layers:
         nn.init.normal_(layer.weight, mean=0., std=0.1)
         nn.init.constant_(layer.bias, 0.)
-
 
 def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
     bs = [s[i] for s in bs]
@@ -192,7 +159,6 @@ def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
     # pull global parameters
     lnet.load_state_dict(gnet.state_dict())
 
-
 def record(global_ep, global_ep_r, ep_r, res_queue, name):
     with global_ep.get_lock():
         global_ep.value += 1
@@ -215,7 +181,6 @@ try:
     from StringIO import StringIO  # Python 2.7
 except ImportError:
     from io import BytesIO         # Python 3.x
-
 
 class Logger(object):
 
@@ -280,7 +245,6 @@ class Logger(object):
         summary = tf.Summary(value=[tf.Summary.Value(tag=tag, histo=hist)])
         self.writer.add_summary(summary, step)
         self.writer.flush()
-
 
 class Runner():
     def __init__(self, env, n_agent, agents, episode=100, step=1000, logger=None):
@@ -371,10 +335,10 @@ class Runner():
             if self.logger != None:
                 self.logger.scalar_summary("reward", sum(ep_r), ep)
                 self.logger.scalar_summary("influence reward", x_s, ep)
-            if ep % 2 == 0:
-                for agent in self.agents:
-                    if agent.temperature > 0.001: agent.temperature = agent.temperature * 0.5
-                    else: agent.temperature = 0.001
+            # if ep % 2 == 0:
+            #     for agent in self.agents:
+            #         if agent.temperature > 0.001: agent.temperature = agent.temperature * 0.5
+            #         else: agent.temperature = 0.001
             x_s = 0
             ep += 1
 
@@ -382,8 +346,12 @@ class Runner():
         p_cf = []
         counter_actions = [self.one_hot(self.action_dim, i)[None, None, :] for i in range(self.action_dim)]
         counter_actions.pop(a0[0])
+        counter_prob = []
+        for i in range(len(prob0[0])):
+            if i != a0[0]:
+                counter_prob.append(prob0[0][i])
         for i in range(len(nets)):
-            y = nets[i].counterfactual(counter_actions)[0]
+            y = nets[i].counterfactual(counter_actions, counter_prob)[0]
             x = p_a[i][0]
             p_cf.append(self.kl_div(x,y))
         return (1-self.alpha) * e + (self.alpha) * self._sum(p_cf), self._sum(p_cf)
@@ -411,7 +379,64 @@ class Runner():
         Taken from: https://gist.github.com/swayson/86c296aa354a555536e6765bbe726ff7
         p, q : array-like, dtype=float
         """
-        p = np.asarray(p, dtype=np.float)
-        q = np.asarray(q, dtype=np.float)
+        p = np.asarray(p.cpu(), dtype=np.float)
+        q = np.asarray(q.cpu(), dtype=np.float)
 
         return np.sum(np.where(p != 0, p * np.log(p / q), 0), axis=-1)
+
+def influencer_reward(e, influencee, influencer_prob, influencer_act, states, influencee_prob, act_dim):
+    def _sum(probs):
+        sum = 0
+        for p in probs:
+            sum += p
+        return sum
+
+    def kl_div(self, p, q):
+        """Kullback-Leibler divergence D(P || Q) for discrete probability dists
+
+        Assumes the probability dist is over the last dimension.
+        Taken from: https://gist.github.com/swayson/86c296aa354a555536e6765bbe726ff7
+        p, q : array-like, dtype=float
+        """
+        p = np.asarray(p.cpu(), dtype=np.float)
+        q = np.asarray(q.cpu(), dtype=np.float)
+
+        return np.sum(np.where(p != 0, p * np.log(p / q), 0), axis=-1)
+
+    def one_hot(self, dim, index, Tensor=True):
+        if Tensor:
+            one_hot = torch.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
+        else:
+            one_hot = np.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot
+
+    p_cf = []                                               #TODO
+    counter_actions = [one_hot(act_dim, i)[None, None, :] for i in range(act_dim)]
+    counter_actions.pop(influencer_act[0])
+    counter_prob = []
+    for i in range(len(influencer_prob[0])):
+        if i != influencer_act[0]:
+            counter_prob.append(prob0[0][i])
+    for i in range(len(nets)):
+        y = nets[i].counterfactual(counter_actions, counter_prob)[0]
+        x = p_a[i][0]
+        p_cf.append(self.kl_div(x, y))
+    return (1 - self.alpha) * e + (self.alpha) * self._sum(p_cf), self._sum(p_cf)
+
+
+def categorical_sample(probs, use_cuda=False):
+    int_acs = torch.multinomial(probs, 1)
+    if use_cuda:
+        tensor_type = torch.cuda.FloatTensor
+    else:
+        tensor_type = torch.FloatTensor
+    acs = torch.Variable(tensor_type(*probs.shape).fill_(0)).scatter_(1, int_acs, 1)
+    return int_acs, acs
+
+def create_seq_obs(seq, obs):   #TODO
+    seq.
+
+
