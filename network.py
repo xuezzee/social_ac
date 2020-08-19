@@ -135,25 +135,23 @@ class A3CNet(nn.Module):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
-        # self.pi1 = nn.Linear(1,32)
-        # self.pi2 = nn.Linear(32,32)
-        self.LSTM = nn.LSTM(
-            input_size=32,
-            hidden_size=32,
-            num_layers=1,
-        )
-        self.pi1 = nn.Linear(s_dim, 32)
-        self.pi2 = nn.Linear(32, a_dim)
-        self.v1 = nn.Linear(s_dim, 32)
-        self.v2 = nn.Linear(32, 1)
-        set_init([self.pi1, self.pi2, self.v1, self.v2])
-        self.distribution = torch.distributions.Categorical
+        if CNN:
+            self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+            self.pi1 = nn.Linear(1,32)
+            self.pi2 = nn.Linear(32,32)
+            self.LSTM = nn.LSTM(
+                input_size=32,
+                hidden_size=32,
+                num_layers=1,
+            )
+        else:
+            self.pi1 = nn.Linear(s_dim, 128)
+            self.pi2 = nn.Linear(128, a_dim)
+            self.v1 = nn.Linear(s_dim, 128)
+            self.v2 = nn.Linear(128, 1)
+            set_init([self.pi1, self.pi2, self.v1, self.v2])
+            self.distribution = torch.distributions.Categorical
 
-    def CNN_preprocess(self,x,width=15,height=15):
-        x = x.reshape(-1,3,width,height)
-        x = torch.relu(self.conv1(x))
-        return torch.flatten(x,1)
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
@@ -184,6 +182,156 @@ class A3CNet(nn.Module):
         a_loss = -exp_v
         total_loss = (c_loss + a_loss).mean()
         return total_loss
+
+class A3CAgent(nn.Module):
+    def __init__(self, act_dim, width, height, channel=3, gamma=0.9, influencer=False):
+        super(A3CAgent, self).__init__()
+        self.conv = nn.Conv2d(in_channels=channel, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+        if influencer:
+            act_dim_input = 0
+            self.influencer = influencer
+        else: act_dim_input = act_dim
+        self.policy = nn.Sequential(
+                                    nn.Linear(int(self.conv.out_channels/channel)*width*height+act_dim_input, 32), nn.ReLU(),
+                                    nn.Linear(32,32), nn.ReLU(),
+                                    nn.LSTM(input_size=32,
+                                            hidden_size=act_dim,
+                                            num_layers=1)
+                                    )
+        self.critic = nn.Sequential(
+                                    nn.Linear(int(self.conv.out_channels/channel)*width*height, 32), nn.ReLU(),
+                                    nn.Linear(32,32), nn.ReLU(),
+                                    nn.LSTM(input_size=32,
+                                            hidden_size=1,
+                                            num_layers=1)
+                                    )
+        self.logist = None
+        self.optimizer = None
+        self.lr_scheduler = None
+
+    def choose_action(self, input, act=None):       #LSTM暂时用不了，如果要跑的话去掉LSTM，换成应该Linear
+        x = self.conv(input)
+        if not self.influencer:
+            x = torch.cat((x, act), dim=-2)
+        temp = torch.flatten(x, start_dim=1, end_dim=-1)
+        x = self.policy(torch.flatten(x, start_dim=1, end_dim=-1))[-1, :, :]    #TODO
+        prob = torch.softmax(x,-1)
+        logist = torch.log_softmax(x,-1)
+        return prob, logist
+
+    def value(self, input):                                                     #TODO
+        x = self.conv(input)
+        v = self.critic(torch.flatten(x, start_dim=1, end_dim=-1))[-1, :, :]
+        return v
+
+    def loss(self, sample):
+        obs, acs, rews, next_obs, dones, acls = sample
+        index = torch.argmax(acs, -1)
+        logs = acls.gather(index=index, dim=-1)                                #因为输入的是dim=9的log prob_distribution，所以用gather选择其中的一个log_prob，没debug，可能纬度对不上
+        v = self.critic(obs)
+        q = torch.add(rews, self.gamma * v)
+        td_err = torch.add(v, q)
+        lossC = torch.square(td_err).mean()
+        lossA = torch.mul(logs, td_err).mean()
+        loss = lossA + lossC
+        return loss
+
+    # def forward(self, input):
+    #     return
+
+
+
+
+
+
+class ActorRNN(nn.Module):
+    def __init__(self,state_dim,action_dim,CNN=True):
+        super(ActorRNN, self).__init__()
+        self.CNN = CNN
+        if CNN:
+            self.Conv1 = nn.Conv2d(in_channels=3,out_channels=6,kernel_size=3,stride=1,padding=(1,1))
+            self.Linear_a = nn.Linear(action_dim, 32)
+            self.Linear1 = nn.Linear(state_dim*2, 32)
+            self.Linear2 = nn.Linear(32, 32)
+            self.LSTM = nn.LSTM(
+                input_size=32,
+                hidden_size=32,
+                num_layers=1,
+            )
+            self.out = nn.Linear(32,action_dim)
+        else:
+            self.rnn = nn.GRU(
+                input_size=state_dim,
+                hidden_size=128,
+                num_layers=1,
+            )
+            self.out = nn.Linear(128,action_dim)
+
+    def CNN_preprocess(self,x):
+        x = self.Conv1(x)
+        x = torch.relu(x)
+        x = torch.flatten(x, start_dim=1,end_dim=-1).unsqueeze(0)
+        return x
+
+    def forward(self, x, a=None):
+        x = self.CNN_preprocess(x)
+        x = torch.relu(self.Linear1(x))
+        x = torch.relu(self.Linear2(x))
+        x = x.reshape(-1,1,32)
+        if not isinstance(a, type(None)):
+            a = torch.relu(self.Linear_a(a))
+            a = a.reshape(-1,1,32)
+            x = x+a
+        x, h_n = self.LSTM(x,None)
+        x = F.relu(x[-1,:,:])
+        x = self.out(x)
+        return F.softmax(x)
+
+class CriticRNN(nn.Module):
+    def __init__(self,state_dim,action_dim,CNN=True):
+        super(CriticRNN, self).__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.CNN = CNN
+        if CNN:
+            self.Conv1 = nn.Conv2d(in_channels=3,out_channels=6,kernel_size=3,stride=1,padding=(1,1))
+            self.Linear_a = nn.Linear(action_dim, 32)
+            self.Linear1 = nn.Linear(state_dim*2, 32)
+            self.Linear2 = nn.Linear(32, 32)
+            self.LSTM = nn.LSTM(
+                input_size=32,
+                hidden_size=32,
+                num_layers=1,
+            )
+            self.out = nn.Linear(32,1)
+        else:
+            self.rnn = nn.GRU(
+                input_size=state_dim,
+                hidden_size=128,
+                num_layers=1,
+            )
+            self.out = nn.Linear(128,1)
+
+    def CNN_preprocess(self, x):
+        if not isinstance(x, type(torch.Tensor())):
+            x = torch.Tensor(x)
+        x = self.Conv1(x)
+        x = torch.relu(x)
+        x = torch.flatten(x, start_dim=1,end_dim=-1).unsqueeze(0)
+        return x
+
+    def forward(self, x, a=None):
+        x = self.CNN_preprocess(x)
+        x = torch.relu(self.Linear1(x))
+        x = torch.relu(self.Linear2(x))
+        x = x.reshape(-1,1,32)
+        if not isinstance(a, type(None)):
+            a = torch.relu(self.Linear_a(a))
+            x = x+a
+        x, h_n = self.LSTM(x,None)
+        x = F.relu(x[-1,:,:])
+        x = self.out(x)
+        return x
 
 if __name__ == "__main__":
     model_name = "pg_social"

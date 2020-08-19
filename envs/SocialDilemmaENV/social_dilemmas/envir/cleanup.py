@@ -21,7 +21,7 @@ SPAWN_PROB = [0, 0.005, 0.02, 0.05]
 thresholdDepletion = 0.4
 thresholdRestoration = 0.0
 wasteSpawnProbability = 0.5
-appleRespawnProbability = 0.5
+appleRespawnProbability = 0.125
 
 
 class CleanupEnv(MapEnv):
@@ -236,7 +236,7 @@ class CleanupEnv(MapEnv):
 
     def setAppleRespawnRate(self, ep):
         if self.appleRespawnProbability > 0.05:
-            if ep%20 == 0 and ep!=0:
+            if ep%5 == 0 and ep!=0:
                 self.appleRespawnProbability = self.appleRespawnProbability * 0.5
             print(self.appleRespawnProbability)
         else:

@@ -1,5 +1,5 @@
 import numpy as np
-
+import tkinter
 from envs.SocialDilemmaENV.social_dilemmas.envir.agent import HarvestAgent  # HARVEST_VIEW_SIZE
 from envs.SocialDilemmaENV.social_dilemmas.constants import HARVEST_MAP,HARVEST_MAP2,HARVEST_MAP3,HARVEST_MAP4,HARVEST_MAP5
 from envs.SocialDilemmaENV.social_dilemmas.envir.map_env import MapEnv, ACTIONS
@@ -16,6 +16,7 @@ class HarvestEnv(MapEnv):
 
     def __init__(self, ascii_map=HARVEST_MAP, num_agents=1, render=False):
         super().__init__(ascii_map, num_agents, render)
+        self.root = None
         self.apple_points = []
         for row in range(self.base_map.shape[0]):
             for col in range(self.base_map.shape[1]):
@@ -101,3 +102,67 @@ class HarvestEnv(MapEnv):
         counts_dict = dict(zip(unique, counts))
         num_apples = counts_dict.get('A', 0)
         return num_apples
+
+    def _close_view(self):
+        if self.root:
+            self.root.destory()
+            self.root = None
+            self.canvas = None
+        # self.done = True
+
+    def _render(self, map):
+        scale = 20
+        width = map.shape[0] * scale
+        height = map.shape[1] * scale
+        if self.root is None:
+            self.root = tkinter.Tk()
+            self.root.title("social_dilemmas")
+            self.root.protocol("WM_DELETE_WINDOW", self._close_view)
+            self.canvas = tkinter.Canvas(self.root, width=width, height=height)
+            self.canvas.pack()
+
+        self.canvas.delete(tkinter.ALL)
+        self.canvas.create_rectangle(0, 0, width, height, fill="black")
+
+        def fill_cell(x, y, color):
+            self.canvas.create_rectangle(
+                x * scale,
+                y * scale,
+                (x + 1) * scale,
+                (y + 1) * scale,
+                fill=color
+            )
+
+        for x in range(map.shape[0]):
+            for y in range(map.shape[1]):
+                if map[x,y] == '@':
+                    fill_cell(x,y,'Grey')
+                if map[x,y] == 'A':
+                    fill_cell(x,y,'Green')
+                if map[x,y] == '1':
+                    fill_cell(x,y,'Red')
+                if map[x,y] == '2':
+                    fill_cell(x,y,'Blue')
+                if map[x,y] == 'H':
+                    fill_cell(x,y,'Orange')
+                if map[x,y] == 'S':
+                    fill_cell(x,y,'Navy')
+                if map[x,y] == 'R':
+                    fill_cell(x,y,'Cyan')
+                if map[x,y] == 'F':
+                    fill_cell(x,y,'Yellow')
+                if map[x,y] == 'C':
+                    fill_cell(x,y,'Pink')
+                if map[x,y] == 'B':
+                    fill_cell(x,y,'Pink')
+                if map[x,y] == 'p':
+                    fill_cell(x,y,'Purple')
+                if map[x,y] == '3':
+                    fill_cell(x,y,'Magenta')
+                if map[x,y] == '4':
+                    fill_cell(x,y,'Lavender')
+                if map[x,y] == '5':
+                    fill_cell(x,y,'Purple')
+
+
+        self.root.update()
