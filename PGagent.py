@@ -249,102 +249,118 @@ class A3C(mp.Process):
         self.res_queue.put(None)
 
 class SocialInfluence(mp.Process):
-    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr):
-        super(SocialInfluence, self).__init__()
+    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True, device="cpu"):
+        if multiProcess:
+            super(SocialInfluence, self).__init__()
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.sender = None
         self.name = 'w%02i' % name
         self.agent_num = agent_num
-        self.GAMMA = 0.9
+        self.multiProcess = multiProcess
+        self.GAMMA = 0.99
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
-        self.lnet = [A3CNet(state_dim, action_dim)]
-        self.lnet = self.lnet + [A3CNet(state_dim+1, action_dim) for i in range(1, agent_num)]
+        self.lnet = [A3CNet(state_dim*2, action_dim).to(device)]
+        self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim).to(device) for i in range(1, agent_num)]
         self.env = env
+        self.device = device
 
     def run(self):
+        x_s = 0
         ep = 0
         while self.g_ep.value < 100:
             # total_step = 1
             s = self.env.reset()
             buffer_s, buffer_a, buffer_r = [], [], []
             ep_r = [0. for i in range(self.agent_num)]
-            for step in range(1000):
-                # print(ep)
-                # if self.name == 'w00' and self.g_ep.value%10 == 0:
-                #     path = "/Users/xue/Desktop/temp/temp%d"%self.g_ep.value
+            for step in range(1, 1000):
+                print(step)
+                # if self.name == 'w00' and ep%10 == 0:
+                #     path = "/Users/xue/Desktop/temp/temp%d"%ep
                 #     if not os.path.exists(path):
                 #         os.mkdir(path)
                 #     self.env.render(path)
-                s0 = s[0]
-                a0, prob0 = self.lnet[0].choose_action(v_wrap(s0[None, :]), True)
-                a0 = [a0]
-                s = [np.concatenate((s[i],np.array(a0)),-1) for i in range(1, self.agent_num)]
+                s0 = self.lnet[0].CNN_preprocess(v_wrap(s[0][None, :],device=self.device))
+                a0, prob0 = self.lnet[0].choose_action(s0, True)
+                a0_exe = [a0]
+                a0 = self.one_hot(self.action_dim, a0)
+                s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s[i][None, :], device=self.device)),a0[None, :]),-1).to(self.device) for i in range(1, self.agent_num)]
                 s = [s0] + s
-                a = [self.lnet[i].choose_action(v_wrap(s[i][None, :]), True) for i in range(1, self.agent_num)]
+                a = [self.lnet[i].choose_action(s[i], True) for i in range(1, self.agent_num)]
                 prob = [elem[1] for elem in a]
-                a = a0 + [elem[0] for elem in a]
-                s_, r, done, _ = self.env.step(a,need_argmax=False)
-                # print(a)
-                # if done[0]: r = -1
+                a_exe = a0_exe + [elem[0] for elem in a]
+                a = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in a]
+                s_, r, done, _ = self.env.step(a_exe,need_argmax=False)
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
-                x = self._influencer_reward(r[0], self.lnet[1:], prob0, a0, s[1:], prob)
+                x,_ = self._influencer_reward(r[0], self.lnet[1:], prob0, a0_exe, s[1:], prob, step)
                 r = [float(i) for i in r]
-                r[0] += x.numpy()
-                buffer_a.append(a)
+                x_s += _.cpu().numpy()
+                r[0] += x.detach().cpu().numpy()
+                buffer_a.append(a_exe)
                 buffer_s.append(s)
                 buffer_r.append(r)
 
-                if step % 5 == 0 and step != 0:  # update global and assign to local net
-                    _s0 = s_[0]
-                    a0 = self.lnet[0].choose_action(v_wrap(_s0[None, :]), False)
-                    a0 = [a0]
-                    _s = [np.concatenate((s_[i], np.array(a0)), -1) for i in range(1, self.agent_num)]
+                if step % 5 == 0:  # update global and assign to local net
+                    _s0 = self.lnet[0].CNN_preprocess(v_wrap(s_[None, :],device=self.device))
+                    a0 = self.lnet[0].choose_action(_s0, False)
+                    a0 = self.one_hot(self.action_dim, a0)
+                    _s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s_[i][None, :],device=self.device)),a0[None, :]),-1).to(self.device) for i in range(1, self.agent_num)]
                     _s = [_s0] + _s
                     # sync
                     done = [False for i in range(self.agent_num)]
-                    [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],
-                                   _s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i)
-                                                    for i in range(self.agent_num)]
+                    [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],_s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
                     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
                     buffer_s, buffer_a, buffer_r = [], [], []
-                # if ep == 999:  # done and print information
-                #     record(self.g_ep, self.g_ep_r, sum(ep_r), self.res_queue, self.name)
-                #     break
                 s = s_
-                # total_step += 1
-            print('ep%d'%ep, self.name, sum(ep_r))
+            print('ep%d'%ep, self.name, sum(ep_r), x_s)
+            x_s = 0
             ep+=1
-            if self.name == "w00":
+            if self.name == "w00" and self.multiProcess:
                 self.sender.send([sum(ep_r),ep])
-        self.res_queue.put(None)
+            if not self.multiProcess:
+                writer.scalar_summary("reward", sum(ep_r), ep)
+        if self.multiProcess:
+            self.res_queue.put(None)
 
-    def _influencer_reward(self, e, nets, prob0, a0, s, p_a):
+    def _influencer_reward(self, e, nets, prob0, a0, s, p_a, step=0):
         a_cf = []
         for i in range(self.action_dim):
             if i != a0[0]:
                 a_cf.append(i)
         p_cf = []
-        s_cf = np.array([[np.concatenate((s[i][ :-1],np.array([a_cf[j]])),-1) for j in range(self.action_dim-1)] for i in range(self.agent_num-1)])
+        s_cf = [torch.cat([torch.cat((s[i][:, :-self.action_dim],self.one_hot(self.action_dim, a_cf[j])[None, :]),-1).to(self.device)
+                          for j in range(self.action_dim-1)]) for i in range(self.agent_num-1)]
         for i in range(len(nets)):
-            # _a = [nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1] for i in range(self.agent_num-1)]
-            # temp = nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0]
-            _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1][0], prob0)]
-            # _a =
-            _a = torch.sum(_a[0],-2)
+            temp = nets[i].choose_action(s_cf[i], True)[1]
+            _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim-1)]
+            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
+            _a = self._sum(_a)/torch.sum(self._sum(_a))
             x = p_a[i][0]
             y = _a.detach()
             p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
+            # if step == 999:
+            #     print("p_a:",p_a[i][0], "cf_a:",y)
+            # print(self._sum(p_cf))
             # l = scipy.stats.entropy(x.numpy(), y.numpy())
-        return e + 50*self._sum(p_cf)/len(p_cf)
+        return 0.5*e + 0.5*self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
         sum = 0
         for t in tar:
             sum += t
         return sum
+
+    def one_hot(self, dim, index, Tensor=True):
+        if Tensor:
+            one_hot = torch.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot.to(self.device)
+        else:
+            one_hot = np.zeros(dim)
+            one_hot[index] = 1.
+            return one_hot.to(self.device)
 
 class IAC_RNN(IAC):
     '''
@@ -481,23 +497,24 @@ class IAC_RNN(IAC):
         self.optimizerA.step()
         self.lr_scheduler["optA"].step()
 
-
 class influence_A3C():
-    def __init__(self, obs_dim, act_dim, lr, agents, obs_type="RGB", width=None, height=None, channel=None, lr_scheduler=False, influencer_num=1):
+    def __init__(self, obs_dim, act_dim, lr, agents, obs_type="RGB", width=None, height=None, channel=None, lr_scheduler=False, influencer_num=1, device="cpu"):
         self.agents = agents
         self.agent_num = len(agents)
         self.influencer_num = influencer_num
         self.lr_scheduler = lr_scheduler
         self.action = act_dim
         self.obs_type = obs_type
+        self.device = device
         if obs_type == "RGB":self.width = width; self.height = height; self.channel = channel
         self.obs_dim = obs_dim
-        for i in range(self.agent_num):
-            self.agents[i].optimizer = SharedAdam(self.agents[i].parameters(), lr=lr, betas=(0.92,0.99))            #optimizer和scheduler放在agent（network）了
-            if lr_scheduler:self.agents[i].lr_scheduler = torch.optim.lr_scheduler.StepLR(self.agents[i].optimizer, #SharedAdam是莫烦A3C中实现的optimizer，好像是用来同时更新两个网络的，细节不太懂
-                                                                                          step_size=10000,
-                                                                                          gamma=0.9,
-                                                                                          last_epoch=-1)
+        # for i in range(self.agent_num):
+            # self.agents[i].optimizer = SharedAdam(self.agents[i].parameters(), lr=lr, betas=(0.92,0.99))            #optimizer和scheduler放在agent（network）了
+            # self.agents[i].optimizer = torch.optim.Adam(self.agents[i].parameters(), lr=lr)
+            # if lr_scheduler:self.agents[i].lr_scheduler = torch.optim.lr_scheduler.StepLR(self.agents[i].optimizer, #SharedAdam是莫烦A3C中实现的optimizer，好像是用来同时更新两个网络的，细节不太懂
+            #                                                                               step_size=10000,
+            #                                                                               gamma=0.9,
+            #                                                                               last_epoch=-1)
 
 
     def choose_influencer_action(self, observations):                               #选择influencer的action， 直接放obs
@@ -507,35 +524,40 @@ class influence_A3C():
         influencer_act_onehot = []
         for agent, obs in zip(self.agents[:self.influencer_num], observations[:self.influencer_num]):
             prob, logist = agent.choose_action(obs)
-            int_act, act = categorical_sample(prob)                                 #MAAC里的函数直接那过来的， 放入probability distribution, 返回int型动作和 onehot 动作
+            int_act, act = categorical_sample(prob.detach())                                 #MAAC里的函数直接那过来的， 放入probability distribution, 返回int型动作和 onehot 动作
             influencer_act_logists.append(logist)
             influencer_act_prob.append(prob)
-            influencer_act_onehot.append(act)
+            influencer_act_onehot.append(act.detach().cpu().numpy())
             influencer_act_int.append(int_act)
         return influencer_act_onehot, influencer_act_prob, influencer_act_int, influencer_act_logists
 
 
     def choose_action(self, observations, influencer_action):                       #使用obs和influencer的动作作为输入
+        if self.device == torch.device("cuda"):use_cuda = True
+        else:use_cuda = False
         influencee_logist = []
         influencee_onehot = []
-        for agent, obs, inf_act in zip(self.agents[self.influencer_num:],
-                                       observations[self.influencer_num:],
-                                       influencer_action[self.influencer_num:]):
-            prob, logist = agent.choose_action(obs, inf_act)                        #具体见network中A3CAgent
-            int_act, act = categorical_sample(prob)
-            influencee_logist.append(logist)
-            influencee_onehot.append(act)
+
+        for agent, obs in zip(self.agents[self.influencer_num:],
+                                       observations[self.influencer_num:]):
+            prob, logist = agent.choose_action(obs, influencer_action[0])                        #具体见network中A3CAgent
+            int_act, act = categorical_sample(prob.detach(), use_cuda=use_cuda)
+            influencee_logist.append(logist.detach())
+            influencee_onehot.append(act.detach())
         return influencee_onehot, influencee_logist
 
 
     def update(self, samples):                                                      #两个网络同时更新，不确定是否管用
-        for agent, sample in zip(self.agents, samples):
-            loss = agent.loss(sample)
-            agent.optimizer.zero_grad()
+        obs, acs, rews, next_obs, dones, acls, inf_ac, = samples
+        for agent, o, ac, rew, o_, i_ac in zip(self.agents, obs, acs, rews, next_obs, inf_ac):
+            loss = agent.loss((o,ac,rew,o_,i_ac))
+            agent.optimizerA.zero_grad()
+            agent.optimizerC.zero_grad()
             loss.backward()
-            agent.optimizer.step()
-            if self.lr_scheduler:
-                agent.lr_scheduler.step()
+            agent.optimizerA.step()
+            agent.optimizerC.step()
+            # if self.lr_scheduler:
+            #     agent.lr_scheduler.step()
 
 
 

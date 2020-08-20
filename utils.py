@@ -40,6 +40,7 @@ class env_wrapper():
         else:
             n_state_ = np.array([state.reshape((-1,self.channel,self.width,self.height)) for state in n_state_.values()])
         n_reward = np.array([reward for reward in n_reward.values()])
+        done = np.array([d for d in done.values()])
         return n_state_/255., n_reward, done, info
 
     def reset(self):
@@ -47,7 +48,8 @@ class env_wrapper():
         if self.flatten:
             return np.array([state.reshape(-1) for state in n_state.values()])/255.
         else:
-            return np.array([state.reshape((-1,self.channel,self.width,self.height)) for state in n_state.values()])/255.
+            return np.array([state[np.newaxis,:,:,:].transpose(0,3,1,2) for state in n_state.values()])/255.
+            # return np.array([state.reshape((-1,self.channel,self.width,self.height)) for state in n_state.values()])/255.
 
     def seed(self,seed):
         self.env.seed(seed)
@@ -119,10 +121,10 @@ class Agents():
         for i, ag in zip(range(self.num_agent), self.agents):
             torch.save(ag.policy, file_name + "pg" + str(i) + ".pth")
 
-def v_wrap(np_array, dtype=np.float32):
+def v_wrap(np_array, dtype=np.float32, device='cpu'):
     if np_array.dtype != dtype:
         np_array = np_array.astype(dtype)
-    return torch.from_numpy(np_array)
+    return torch.from_numpy(np_array).to(device)
 
 def set_init(layers):
     for layer in layers:
@@ -130,22 +132,24 @@ def set_init(layers):
         nn.init.constant_(layer.bias, 0.)
 
 def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
-    bs = [s[i] for s in bs]
+    bs = [s[i][0] for s in bs]
     ba = [a[i] for a in ba]
     br = [r[i] for r in br]
     if done:
         v_s_ = 0.               # terminal
     else:
-        v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+        # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+        v_s_ = lnet.forward(s_)[-1].data.cpu().numpy()[0, 0]
 
     buffer_v_target = []
     for r in br[::-1]:    # reverse buffer r
         v_s_ = r + gamma * v_s_
         buffer_v_target.append(v_s_)
     buffer_v_target.reverse()
-
+    # ca = v_wrap(np.vstack(bs))
+    ca = torch.stack(bs,0)
     loss = lnet.loss_func(
-        v_wrap(np.vstack(bs)),
+        ca,
         v_wrap(np.array(ba), dtype=np.int64) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba)),
         v_wrap(np.array(buffer_v_target)[:, None]))
 
@@ -433,10 +437,14 @@ def categorical_sample(probs, use_cuda=False):
         tensor_type = torch.cuda.FloatTensor
     else:
         tensor_type = torch.FloatTensor
-    acs = torch.Variable(tensor_type(*probs.shape).fill_(0)).scatter_(1, int_acs, 1)
+    acs = torch.autograd.Variable(tensor_type(*probs.shape).fill_(0)).scatter_(1, int_acs, 1)
     return int_acs, acs
 
-def create_seq_obs(seq, obs):   #TODO
-    seq.
+def create_seq_obs(seq, obs, l):   #TODO
+    seq = np.roll(seq, l-1, axis=2)
+    seq = np.concatenate((seq[1:], obs),axis=0)
+    # t = tuple(range(3,len(seq.shape)))
+    return seq
+
 
 

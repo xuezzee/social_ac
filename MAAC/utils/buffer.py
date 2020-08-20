@@ -6,7 +6,7 @@ class ReplayBuffer(object):
     """
     Replay Buffer for multi-agent RL with parallel rollouts
     """
-    def __init__(self, max_steps, num_agents, obs_dims, ac_dims, obs_type="RGB", width=None, height=None, channel=None):
+    def __init__(self, max_steps, num_agents, obs_dims, ac_dims, obs_type="RGB", width=None, height=None, channel=None, seq=5):
         """
         Inputs:
             max_steps (int): Maximum number of timepoints to store in buffer
@@ -26,13 +26,13 @@ class ReplayBuffer(object):
         self.influencer_action = []
         if obs_type == "RGB":
             for w, h, c, adim in zip(width, height, channel, ac_dims):
-                self.obs_buffs.append(np.zeros((max_steps, c, w, h), dtype=np.float32))
+                self.obs_buffs.append(np.zeros((max_steps, seq, c, w, h), dtype=np.float32))
                 self.ac_buffs.append(np.zeros((max_steps, adim), dtype=np.float32))
                 self.rew_buffs.append(np.zeros(max_steps, dtype=np.float32))
-                self.next_obs_buffs.append(np.zeros((max_steps, c, w, h), dtype=np.float32))
+                self.next_obs_buffs.append(np.zeros((max_steps, seq, c, w, h), dtype=np.float32))
                 self.done_buffs.append(np.zeros(max_steps, dtype=np.uint8))
                 self.acl_buffs.append(np.zeros((max_steps, adim), dtype=np.float32))
-                self.influencer_action.append(np.zeros((max_steps, adim), dtype=np.float32))
+                self.influencer_action.append(np.zeros((max_steps, seq, adim), dtype=np.float32))
         else:
             for odim, adim in zip(obs_dims, ac_dims):
                 self.obs_buffs.append(np.zeros((max_steps, odim), dtype=np.float32))
@@ -50,7 +50,7 @@ class ReplayBuffer(object):
     def __len__(self):
         return self.filled_i
 
-    def push(self, observations, actions, rewards, next_observations, dones, influencer_action, actions_log=None):
+    def push(self, observations, actions, rewards, next_observations, dones, actions_log, influencer_action):
         nentries = observations.shape[0]  # handle multiple parallel environments
         if self.curr_i + nentries > self.max_steps:
             rollover = self.max_steps - self.curr_i # num of indices to roll over
@@ -72,16 +72,16 @@ class ReplayBuffer(object):
             self.curr_i = 0
             self.filled_i = self.max_steps
         for agent_i in range(self.num_agents):
-            self.obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.vstack(
-                observations[:, agent_i])
+            self.obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.stack(
+                observations[:, agent_i],axis=0)
             # actions are already batched by agent, so they are indexed differently
             self.ac_buffs[agent_i][self.curr_i:self.curr_i + nentries] = actions[agent_i]
             self.rew_buffs[agent_i][self.curr_i:self.curr_i + nentries] = rewards[:, agent_i]
-            self.next_obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.vstack(
-                next_observations[:, agent_i])
+            self.next_obs_buffs[agent_i][self.curr_i:self.curr_i + nentries] = np.stack(
+                next_observations[:, agent_i],axis=0)
             self.done_buffs[agent_i][self.curr_i:self.curr_i + nentries] = dones[:, agent_i]
-            self.acl_buffs[agent_i][self.curr_i:self.curr_i + nentries] = actions_log[:, agent_i]
-            self.influencer_action[agent_i][self.curr_i:self.curr_i + nentries] = influencer_action[:, agent_i]
+            self.acl_buffs[agent_i][self.curr_i:self.curr_i + nentries] = actions_log[agent_i]
+            self.influencer_action[agent_i][self.curr_i:self.curr_i + nentries] = np.stack(influencer_action[:, agent_i],axis=0)
         self.curr_i += nentries
         if self.filled_i < self.max_steps:
             self.filled_i += nentries

@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from utils import set_init
+import itertools
+import numpy as np
 from torch.distributions import Categorical
 #from gumble import gumbel_softmax
 
@@ -131,27 +133,31 @@ class Centralised_Critic(nn.Module):
 
 
 class A3CNet(nn.Module):
-    def __init__(self, s_dim, a_dim, CNN=False):
+    def __init__(self, s_dim, a_dim, CNN=False, device='cpu'):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        if CNN:
-            self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
-            self.pi1 = nn.Linear(1,32)
-            self.pi2 = nn.Linear(32,32)
-            self.LSTM = nn.LSTM(
-                input_size=32,
-                hidden_size=32,
-                num_layers=1,
-            )
-        else:
-            self.pi1 = nn.Linear(s_dim, 128)
-            self.pi2 = nn.Linear(128, a_dim)
-            self.v1 = nn.Linear(s_dim, 128)
-            self.v2 = nn.Linear(128, 1)
-            set_init([self.pi1, self.pi2, self.v1, self.v2])
-            self.distribution = torch.distributions.Categorical
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+        # self.pi1 = nn.Linear(1,32)
+        # self.pi2 = nn.Linear(32,32)
+        self.LSTM = nn.LSTM(
+            input_size=32,
+            hidden_size=32,
+            num_layers=1,
+        )
+        self.pi1 = nn.Linear(s_dim, 32)
+        self.pi2 = nn.Linear(32, a_dim)
+        self.v1 = nn.Linear(s_dim, 32)
+        self.v2 = nn.Linear(32, 1)
+        set_init([self.pi1, self.pi2, self.v1, self.v2])
+        self.distribution = torch.distributions.Categorical
+        self.device = device
+        self.state_seq = []
 
+    def CNN_preprocess(self,x,width=15,height=15):
+        x = x.reshape(-1,3,width,height)
+        x = torch.relu(self.conv1(x))
+        return torch.flatten(x,1)
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
@@ -166,13 +172,13 @@ class A3CNet(nn.Module):
         prob = F.softmax(logits, dim=1).data
         m = self.distribution(prob)
         if not dist:
-            return m.sample().numpy()[0]
+            return m.sample().cpu().numpy()[0]
         else:
-            return m.sample().numpy()[0], prob
+            return m.sample().cpu().numpy()[0], prob
 
     def loss_func(self, s, a, v_t):
         self.train()
-        logits, values = self.forward(s)
+        logits, values = self.forward(s.to(self.device))
         td = v_t - values
         c_loss = td.pow(2)
 
@@ -183,66 +189,80 @@ class A3CNet(nn.Module):
         total_loss = (c_loss + a_loss).mean()
         return total_loss
 
+
+
 class A3CAgent(nn.Module):
-    def __init__(self, act_dim, width, height, channel=3, gamma=0.9, influencer=False):
+    def __init__(self, act_dim, width, height, channel=3, gamma=0.9, influencer=False, seq_len=5, device="cpu"):
         super(A3CAgent, self).__init__()
-        self.conv = nn.Conv2d(in_channels=channel, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+        self.convA = nn.Conv2d(in_channels=channel, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
+        self.convC = nn.Conv2d(in_channels=channel, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
         if influencer:
             act_dim_input = 0
-            self.influencer = influencer
         else: act_dim_input = act_dim
+        self.influencer = influencer
+        self.input_size = self.convA.out_channels*width*height+act_dim_input
+        self.critic_size = self.convC.out_channels*width*height
         self.policy = nn.Sequential(
-                                    nn.Linear(int(self.conv.out_channels/channel)*width*height+act_dim_input, 32), nn.ReLU(),
+                                    nn.Linear(self.input_size, 32), nn.ReLU(),
                                     nn.Linear(32,32), nn.ReLU(),
                                     nn.LSTM(input_size=32,
                                             hidden_size=act_dim,
                                             num_layers=1)
                                     )
         self.critic = nn.Sequential(
-                                    nn.Linear(int(self.conv.out_channels/channel)*width*height, 32), nn.ReLU(),
+                                    nn.Linear(self.critic_size, 32), nn.ReLU(),
                                     nn.Linear(32,32), nn.ReLU(),
                                     nn.LSTM(input_size=32,
                                             hidden_size=1,
                                             num_layers=1)
                                     )
         self.logist = None
-        self.optimizer = None
+        self.optimizerA = torch.optim.Adam(itertools.chain(self.convA.parameters(),self.policy.parameters()),lr=0.001)
+        self.optimizerC = torch.optim.Adam(itertools.chain(self.convC.parameters(),self.policy.parameters()),lr=0.001)
         self.lr_scheduler = None
+        self.seq_len = seq_len
+        self.gamma = gamma
+        self.channel = channel
+        self.width = width
+        self.height = height
+        self.device = device
 
-    def choose_action(self, input, act=None):       #LSTM暂时用不了，如果要跑的话去掉LSTM，换成应该Linear
-        x = self.conv(input)
+    def choose_action(self, input, act=None, train=False):       #LSTM暂时用不了，如果要跑的话去掉LSTM，换成应该Linear
+        if train:self.train()
+        else:self.eval()
+
+        x = self.convA(input)
+        x = x.flatten(start_dim=1, end_dim=-1)
         if not self.influencer:
-            x = torch.cat((x, act), dim=-2)
-        temp = torch.flatten(x, start_dim=1, end_dim=-1)
-        x = self.policy(torch.flatten(x, start_dim=1, end_dim=-1))[-1, :, :]    #TODO
+            x = torch.cat((x, act), dim=1)
+        x = self.policy(x.reshape((self.seq_len, -1, self.input_size)))[0][-1, :, :]    #change if the size of cell changed
         prob = torch.softmax(x,-1)
         logist = torch.log_softmax(x,-1)
         return prob, logist
 
     def value(self, input):                                                     #TODO
-        x = self.conv(input)
-        v = self.critic(torch.flatten(x, start_dim=1, end_dim=-1))[-1, :, :]
+        # self.train()
+        x = self.convC(input.reshape(-1,self.channel,self.width,self.height))
+        v = self.critic(torch.flatten(x, start_dim=1, end_dim=-1).reshape(self.seq_len, -1, self.critic_size))[0][-1, :, :]
         return v
 
     def loss(self, sample):
-        obs, acs, rews, next_obs, dones, acls = sample
-        index = torch.argmax(acs, -1)
+        # self.train()
+        obs, acs, rews, next_obs, inf_ac = sample
+        index = torch.argmax(acs, -1)[:,None]
+        acp, acls = self.choose_action(obs.flatten(start_dim=0,end_dim=1).to(self.device),
+                                       inf_ac.flatten(start_dim=0,end_dim=1).to(self.device))
         logs = acls.gather(index=index, dim=-1)                                #因为输入的是dim=9的log prob_distribution，所以用gather选择其中的一个log_prob，没debug，可能纬度对不上
-        v = self.critic(obs)
-        q = torch.add(rews, self.gamma * v)
-        td_err = torch.add(v, q)
+        v = self.value(obs)
+        v_ = self.value(next_obs)
+        q = rews[:,None] + self.gamma * v_
+        td_err = torch.add(-v, q)
+        sq = torch.square(td_err)
         lossC = torch.square(td_err).mean()
-        lossA = torch.mul(logs, td_err).mean()
+        x = -torch.mul(logs, td_err.detach())
+        lossA = -torch.mul(logs, td_err.detach()).mean()
         loss = lossA + lossC
         return loss
-
-    # def forward(self, input):
-    #     return
-
-
-
-
-
 
 class ActorRNN(nn.Module):
     def __init__(self,state_dim,action_dim,CNN=True):

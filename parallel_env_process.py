@@ -1,7 +1,7 @@
 from multiprocessing import Process, Pipe
 import numpy as np
 
-def worker(env, pipe):
+def worker(env, pipe, name):
     # obs_space = env.observation_space
     while True:
         label, msg = pipe.recv()
@@ -16,12 +16,13 @@ def worker(env, pipe):
         elif label == "done":
             return
 
+
 class envs_dealer():
     def __init__(self,envs):
         self.envs = envs
         self.num_processes = len(self.envs)
         self.pipe_container = [Pipe() for i in range(self.num_processes)]
-        self.processes = [Process(target=worker, args=(self.envs[i], self.pipe_container[i][1]))
+        self.processes = [Process(target=worker, args=(self.envs[i], self.pipe_container[i][1], i))
                                                             for i in range(self.num_processes)]
         for process in self.processes:
             process.start()
