@@ -140,30 +140,42 @@ class A3CNet(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=3, stride=1, padding=(1,1))
         # self.pi1 = nn.Linear(1,32)
         # self.pi2 = nn.Linear(32,32)
-        self.LSTM = nn.LSTM(
+        self.LSTM_policy = nn.LSTM(
+            input_size=32,
+            hidden_size=32,
+            num_layers=1,
+        )
+        self.LSTM_critic = nn.LSTM(
             input_size=32,
             hidden_size=32,
             num_layers=1,
         )
         self.pi1 = nn.Linear(s_dim, 32)
-        self.pi2 = nn.Linear(32, a_dim)
+        self.pi2 = nn.Linear(32, 32)
+        self.pi_out = nn.Linear(32, a_dim)
         self.v1 = nn.Linear(s_dim, 32)
-        self.v2 = nn.Linear(32, 1)
+        self.v2 = nn.Linear(32, 32)
+        self.v_out = nn.Linear(32,1)
         set_init([self.pi1, self.pi2, self.v1, self.v2])
         self.distribution = torch.distributions.Categorical
         self.device = device
         self.state_seq = []
 
     def CNN_preprocess(self,x,width=15,height=15):
-        x = x.reshape(-1,3,width,height)
+        # x = x.reshape(-1,3,width,height)
         x = torch.relu(self.conv1(x))
-        return torch.flatten(x,1)
+        return torch.flatten(x,start_dim=-3, end_dim=-1)
 
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
-        logits = self.pi2(pi1)
+        pi2 = torch.relu(self.pi2(pi1))
+        # temp = pi2[:,None,:]
+        pi3, _ = self.LSTM_policy(pi2)
+        logits = self.pi_out(pi3[-1,:,:])
         v1 = torch.relu(self.v1(x))
-        values = self.v2(v1)
+        v2 = torch.relu(self.v2(v1))
+        v3, _ = self.LSTM_critic(v2)
+        values = self.v_out(v3[-1,:,:])
         return logits, values
 
     def choose_action(self, s, dist=False):

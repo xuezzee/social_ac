@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
 from network import Actor, Critic, CNN_preprocess, Centralised_Critic, ActorLaw, A3CNet, CriticRNN, ActorRNN
-from utils import v_wrap, set_init, push_and_pull, record, Logger, categorical_sample
+from utils import v_wrap, set_init, record, Logger, categorical_sample, Updater
 import copy
 import itertools
 from collections import deque
@@ -266,28 +266,44 @@ class SocialInfluence(mp.Process):
         self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim).to(device) for i in range(1, agent_num)]
         self.env = env
         self.device = device
+        self.updater = None
 
     def run(self):
         x_s = 0
         ep = 0
+        self.updater = Updater(5, self.device)
         while self.g_ep.value < 100:
-            # total_step = 1
             s = self.env.reset()
             buffer_s, buffer_a, buffer_r = [], [], []
+            self.updater.get_first_state(s)
             ep_r = [0. for i in range(self.agent_num)]
-            for step in range(1, 1000):
-                print(step)
+            for step in range(1, 1001):
+                # print(step)
                 # if self.name == 'w00' and ep%10 == 0:
                 #     path = "/Users/xue/Desktop/temp/temp%d"%ep
                 #     if not os.path.exists(path):
                 #         os.mkdir(path)
                 #     self.env.render(path)
-                s0 = self.lnet[0].CNN_preprocess(v_wrap(s[0][None, :],device=self.device))
-                a0, prob0 = self.lnet[0].choose_action(s0, True)
+                s0 = self.lnet[0].CNN_preprocess(v_wrap(self.updater.seq_obs(0),device=self.device))
+                a0, prob0 = self.lnet[0].choose_action(s0[:,None,:], True)
                 a0_exe = [a0]
                 a0 = self.one_hot(self.action_dim, a0)
-                s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s[i][None, :], device=self.device)),a0[None, :]),-1).to(self.device) for i in range(1, self.agent_num)]
-                s = [s0] + s
+
+                if step == 1:
+                    self.updater.get_first_act_inf(a0.unsqueeze(0))
+                else:
+                    self.updater.get_new_act_inf = a0.unsqueeze(0)
+
+                temp = v_wrap(self.updater.seq_obs(0), device=self.device)
+
+                s = []
+                for i in range(1, self.agent_num):
+                    s.append(torch.cat((self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)),
+                                v_wrap(self.updater.seq_act())),-1).unsqueeze(1).to(self.device))
+                # s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)),
+                #                 v_wrap(self.updater.seq_act())),-1).to(self.device)
+                #                 for i in range(1, self.agent_num)]
+                s = [s0.unsqueeze(1)] + s
                 a = [self.lnet[i].choose_action(s[i], True) for i in range(1, self.agent_num)]
                 prob = [elem[1] for elem in a]
                 a_exe = a0_exe + [elem[0] for elem in a]
@@ -303,17 +319,20 @@ class SocialInfluence(mp.Process):
                 buffer_r.append(r)
 
                 if step % 5 == 0:  # update global and assign to local net
-                    _s0 = self.lnet[0].CNN_preprocess(v_wrap(s_[None, :],device=self.device))
-                    a0 = self.lnet[0].choose_action(_s0, False)
+                    _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
+                    _s0 = self.lnet[0].CNN_preprocess(_s[0])
+                    a0 = self.lnet[0].choose_action(_s0[:,None,:], False)
                     a0 = self.one_hot(self.action_dim, a0)
-                    _s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(s_[i][None, :],device=self.device)),a0[None, :]),-1).to(self.device) for i in range(1, self.agent_num)]
+                    a0 = self.updater.get_next_innfluencer_act(a0.unsqueeze(0), require_tensor=True)
+                    _s = [torch.cat((self.lnet[i].CNN_preprocess(_s[i], ),a0),-1).to(self.device) for i in range(1, self.agent_num)]
                     _s = [_s0] + _s
                     # sync
                     done = [False for i in range(self.agent_num)]
-                    [push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],_s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
+                    [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],_s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
                     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
                     buffer_s, buffer_a, buffer_r = [], [], []
                 s = s_
+                self.updater.get_new_state = s
             print('ep%d'%ep, self.name, sum(ep_r), x_s)
             x_s = 0
             ep+=1
@@ -330,10 +349,23 @@ class SocialInfluence(mp.Process):
             if i != a0[0]:
                 a_cf.append(i)
         p_cf = []
-        s_cf = [torch.cat([torch.cat((s[i][:, :-self.action_dim],self.one_hot(self.action_dim, a_cf[j])[None, :]),-1).to(self.device)
-                          for j in range(self.action_dim-1)]) for i in range(self.agent_num-1)]
+        temp = self.one_hot(self.action_dim, a_cf[0])[None, :]
+        # s_cf = [[torch.cat((s[i][:, :, :-self.action_dim],
+        #         self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[j])[None, :], require_tensor=True)),-1)[None,:].to(self.device)
+        #         for j in range(self.action_dim-1)] for i in range(self.agent_num-1)]
+        s_cf = []
+        # temp = self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[0]).unsqueeze(0), require_tensor=True)
+        for i in range(self.agent_num-1):
+            s_cf_i = []
+            for j in range(self.action_dim-1):
+                a = s[i][:,:,:-self.action_dim]
+                b = self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[0]).unsqueeze(0), require_tensor=True).unsqueeze(1)
+                s_cf_i.append(torch.cat([a, b], -1).to(self.device))
+            s_cf.append(s_cf_i)
+
         for i in range(len(nets)):
-            temp = nets[i].choose_action(s_cf[i], True)[1]
+            t = torch.cat(s_cf[i],axis=1)
+            temp = nets[i].choose_action(t, True)[1]
             _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim-1)]
             # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
             _a = self._sum(_a)/torch.sum(self._sum(_a))

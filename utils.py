@@ -131,37 +131,125 @@ def set_init(layers):
         nn.init.normal_(layer.weight, mean=0., std=0.1)
         nn.init.constant_(layer.bias, 0.)
 
-def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
-    bs = [s[i][0] for s in bs]
-    ba = [a[i] for a in ba]
-    br = [r[i] for r in br]
-    if done:
-        v_s_ = 0.               # terminal
-    else:
-        # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
-        v_s_ = lnet.forward(s_)[-1].data.cpu().numpy()[0, 0]
+class Updater():
+    def __init__(self, seq_len, device='cpu', n_agents=5):
+        self.device = device
+        self.seq_state = None
+        self.seq_act_inf = None
+        self.n_agents = n_agents
+        self.seq_len = seq_len
+        self.obs_batch = []
+        self.act_batch = []
+        self.next_obs_batch = []
+        self.rew_batch = []
 
-    buffer_v_target = []
-    for r in br[::-1]:    # reverse buffer r
-        v_s_ = r + gamma * v_s_
-        buffer_v_target.append(v_s_)
-    buffer_v_target.reverse()
-    # ca = v_wrap(np.vstack(bs))
-    ca = torch.stack(bs,0)
-    loss = lnet.loss_func(
-        ca,
-        v_wrap(np.array(ba), dtype=np.int64) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba)),
-        v_wrap(np.array(buffer_v_target)[:, None]))
+    def get_first_state(self, f_s):
+        self.seq_state = [torch.zeros_like(torch.Tensor(f_s)).to(self.device) for i in range(self.seq_len-1)]
+        self.seq_state.append(torch.Tensor(f_s).to(self.device))
 
-    # calculate local gradients and push local parameters to global
-    opt.zero_grad()
-    loss.backward()
-    for lp, gp in zip(lnet.parameters(), gnet.parameters()):
-        gp._grad = lp.grad
-    opt.step()
+    def get_first_act_inf(self, f_a):
+        self.seq_act_inf = [torch.zeros_like(torch.Tensor(f_a)).to(self.device) for i in range(self.seq_len-1)]
+        self.seq_act_inf.append(torch.Tensor(f_a).to(self.device))
 
-    # pull global parameters
-    lnet.load_state_dict(gnet.state_dict())
+    @property
+    def get_new_state(self):
+        pass
+
+    @get_new_state.setter
+    def get_new_state(self, n_s):
+        self._roll(torch.Tensor(n_s).to(self.device), 's')
+
+    @property
+    def get_new_act_inf(self):
+        pass
+
+    @get_new_act_inf.setter
+    def get_new_act_inf(self, n_a):
+        self._roll(n_a, 'a')
+
+    def _roll(self, new, s_a):
+        if s_a == 's':
+            self.seq_state.pop(0)
+            self.seq_state.append(new)
+        else:
+            self.seq_act_inf.pop(0)
+            self.seq_act_inf.append(new)
+
+    def seq_obs(self, index):
+        t = np.concatenate(self.seq_state, axis=1)
+        return t[index]
+
+    def seq_act(self):
+        t = np.concatenate(self.seq_act_inf)
+        return t
+
+    def counter_acts(self, c_a, require_tensor):
+        if require_tensor:
+            return torch.cat(self.seq_act_inf[:-1] + [c_a]).to(self.device)
+        else:
+            return self.seq_act_inf[:-1] + [c_a]
+
+    def get_next_seq_obs(self, next_obs, require_tensor):
+        if isinstance(next_obs, torch.Tensor):
+            if not require_tensor:
+                next_obs = next_obs.cpu().numpy()
+        else:
+            if require_tensor:
+                next_obs = torch.Tensor(next_obs).to(self.device)
+        if require_tensor:
+            return torch.cat(self.seq_state[1:] + [next_obs], axis=1).to(self.device)
+        else:
+            return self.seq_state[1:] + [next_obs]
+
+    def get_next_innfluencer_act(self, next_act, require_tensor):
+        if isinstance(next_act, torch.Tensor):
+            if not require_tensor:
+                next_act = next_act.cpu().numpy()
+        else:
+            if require_tensor:
+                next_act = torch.Tensor(next_act).to(self.device)
+        if require_tensor:
+            return torch.cat(self.seq_act_inf[1:] + [next_act], axis=0).to(self.device)
+        else:
+            return self.seq_act_inf[1:] + [next_act]
+
+    def push_and_pull(self, opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
+        bs = [s[i] for s in bs]
+        ba = [a[i] for a in ba]
+        br = [r[i] for r in br]
+        if done:
+            v_s_ = 0.               # terminal
+        else:
+            # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+            _, v_s_ = lnet.forward(s_.unsqueeze(1))
+            v_s_ = v_s_.data.cpu().numpy()[0, 0]
+
+        buffer_v_target = []
+        for r in br[::-1]:    # reverse buffer r
+            v_s_ = r + gamma * v_s_
+            buffer_v_target.append(v_s_)
+        buffer_v_target.reverse()
+        # ca = v_wrap(np.vstack(bs))
+        ca = torch.cat(bs,axis=1).to(self.device)
+        loss = lnet.loss_func(
+            ca,
+            v_wrap(np.array(ba), dtype=np.int64, device=self.device) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba),device=self.device),
+            v_wrap(np.array(buffer_v_target)[:, None],device=self.device))
+
+        # calculate local gradients and push local parameters to global
+        opt.zero_grad()
+        loss.backward()
+        for lp, gp in zip(lnet.parameters(), gnet.parameters()):
+            gp._grad = lp.grad
+        opt.step()
+
+        # pull global parameters
+        lnet.load_state_dict(gnet.state_dict())
+
+    # def push_and_pull(self, opt, lnet, gnet, s_, gamma, i):
+    #     bs = [obs[i] for obs in self.obs_batch]
+    #     ba = [act[i] for act in self.act_batch]
+    #     br = [rew[i] for rew in self.rew_batch]
 
 def record(global_ep, global_ep_r, ep_r, res_queue, name):
     with global_ep.get_lock():
