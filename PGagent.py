@@ -262,8 +262,8 @@ class SocialInfluence(mp.Process):
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
-        self.lnet = [A3CNet(state_dim*2, action_dim).to(device)]
-        self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim).to(device) for i in range(1, agent_num)]
+        self.lnet = [A3CNet(state_dim*2, action_dim, device=device).to(device)]
+        self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim, device=device).to(device) for i in range(1, agent_num)]
         self.env = env
         self.device = device
         self.updater = None
@@ -293,8 +293,6 @@ class SocialInfluence(mp.Process):
                     self.updater.get_first_act_inf(a0.unsqueeze(0))
                 else:
                     self.updater.get_new_act_inf = a0.unsqueeze(0)
-
-                temp = v_wrap(self.updater.seq_obs(0), device=self.device)
 
                 s = []
                 for i in range(1, self.agent_num):
@@ -349,17 +347,12 @@ class SocialInfluence(mp.Process):
             if i != a0[0]:
                 a_cf.append(i)
         p_cf = []
-        temp = self.one_hot(self.action_dim, a_cf[0])[None, :]
-        # s_cf = [[torch.cat((s[i][:, :, :-self.action_dim],
-        #         self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[j])[None, :], require_tensor=True)),-1)[None,:].to(self.device)
-        #         for j in range(self.action_dim-1)] for i in range(self.agent_num-1)]
         s_cf = []
-        # temp = self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[0]).unsqueeze(0), require_tensor=True)
         for i in range(self.agent_num-1):
             s_cf_i = []
             for j in range(self.action_dim-1):
                 a = s[i][:,:,:-self.action_dim]
-                b = self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[0]).unsqueeze(0), require_tensor=True).unsqueeze(1)
+                b = self.updater.counter_acts(self.one_hot(self.action_dim, a_cf[j]).unsqueeze(0), require_tensor=True).unsqueeze(1)
                 s_cf_i.append(torch.cat([a, b], -1).to(self.device))
             s_cf.append(s_cf_i)
 
@@ -367,15 +360,10 @@ class SocialInfluence(mp.Process):
             t = torch.cat(s_cf[i],axis=1)
             temp = nets[i].choose_action(t, True)[1]
             _a = [temp[j] * prob0[0][a_cf[j]] for j in range(self.action_dim-1)]
-            # _a = [torch.mul(nets[i].choose_action(v_wrap(s_cf[i][None, :]), True)[1], prob0)]
             _a = self._sum(_a)/torch.sum(self._sum(_a))
             x = p_a[i][0]
             y = _a.detach()
             p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
-            # if step == 999:
-            #     print("p_a:",p_a[i][0], "cf_a:",y)
-            # print(self._sum(p_cf))
-            # l = scipy.stats.entropy(x.numpy(), y.numpy())
         return 0.5*e + 0.5*self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
@@ -392,7 +380,7 @@ class SocialInfluence(mp.Process):
         else:
             one_hot = np.zeros(dim)
             one_hot[index] = 1.
-            return one_hot.to(self.device)
+            return one_hot
 
 class IAC_RNN(IAC):
     '''

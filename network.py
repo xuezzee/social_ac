@@ -196,10 +196,19 @@ class A3CNet(nn.Module):
 
         probs = F.softmax(logits, dim=1)
         m = self.distribution(probs)
-        exp_v = m.log_prob(a) * td.detach().squeeze()
+        exp_v = m.log_prob(a) * (td.detach().squeeze() + 0.001 * self.entropy(probs).detach())
         a_loss = -exp_v
         total_loss = (c_loss + a_loss).mean()
         return total_loss
+
+    def entropy(self, distribution):
+        entropy = []
+        for distribution_per_step in distribution:
+            sum = 0
+            for prob in distribution_per_step:
+                sum -= prob*torch.log(prob)
+            entropy.append(sum.unsqueeze(0))
+        return torch.cat(entropy).unsqueeze(0).to(self.device)
 
 
 
@@ -275,6 +284,12 @@ class A3CAgent(nn.Module):
         lossA = -torch.mul(logs, td_err.detach()).mean()
         loss = lossA + lossC
         return loss
+
+    def entropy(self, distribution):
+        sum = 0
+        for prob in distribution:
+            sum -= prob*torch.log(prob)
+        return sum
 
 class ActorRNN(nn.Module):
     def __init__(self,state_dim,action_dim,CNN=True):
