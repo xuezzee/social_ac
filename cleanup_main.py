@@ -49,14 +49,22 @@ def A3C_main_multiProcess():
     n_workers = mp.cpu_count()
     n_workers = 2
     sender, recevier = mp.Pipe()
-    global_net = [A3CNet(675*2, 9, device=device).to(device)]
-    global_net = global_net + [A3CNet(675*2+9, 9, device=device).to(device) for i in range(n_agents-1)]
+
+    global_net = [A3CNet(675*2, 8, device=device).to(device)]
+    global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents-1)]
     optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
-    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.8, last_epoch=-1) for i in range(n_agents)]
-    envs = [env_wrapper(CleanupEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
-    # workers = [A3C(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents, scheduler_lr) for worker in range(n_workers)]
-    workers = [SocialInfluence(envs[worker], global_net, optimizer, global_ep, global_ep_r, res_queue, worker, 675, 9, n_agents,
-                   scheduler_lr) for worker in range(n_workers)]
+    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.9, last_epoch=-1) for i in range(n_agents)]
+    envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
+    workers = [SocialInfluence(envs[worker],
+                               global_net,
+                               optimizer,
+                               global_ep,
+                               global_ep_r,
+                               res_queue,
+                               worker,
+                               675, 8,
+                               n_agents,
+                               scheduler_lr) for worker in range(n_workers)]
     workers[0].sender = sender
     for worker in workers:
         worker.start()
