@@ -214,7 +214,7 @@ class Updater():
             return self.seq_act_inf[1:] + [next_act]
 
     def push_and_pull(self, opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
-        bs = [s[i].unsqueeze(1) for s in bs]
+        bs = [s[i] for s in bs]
         ba = [a[i] for a in ba]
         br = [r[i] for r in br]
         if done:
