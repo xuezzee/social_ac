@@ -394,7 +394,6 @@ class SocialInfluence(mp.Process):
             '''
             ep+=1
             # if self.multiProcess:
-            print(summary)
             self.sender.send([sum(ep_r), ep, self.name, summary])
         if self.multiProcess:
             self.res_queue.put(None)
