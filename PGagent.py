@@ -249,7 +249,9 @@ class A3C(mp.Process):
         self.res_queue.put(None)
 
 class SocialInfluence(mp.Process):
-    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name, state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True, device="cpu"):
+    def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name,
+                 state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True, device="cpu",
+                 take_action_in_turn = False, first_decision_num = 0):
         if multiProcess:
             super(SocialInfluence, self).__init__()
         self.action_dim = action_dim
@@ -262,11 +264,21 @@ class SocialInfluence(mp.Process):
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
         self.scheduler_lr = scheduler_lr
-        self.lnet = [A3CNet(state_dim*2, action_dim, device=device).to(device)]
-        self.lnet = self.lnet + [A3CNet(state_dim*2+action_dim, action_dim, device=device).to(device) for i in range(1, agent_num)]
+        self.lnet = [A3CNet(
+                            global_net[0].s_dim,
+                            global_net[0].a_dim,
+                            device=device,
+                            ).to(device) for i in range(first_decision_num)]
+        self.lnet = self.lnet + [A3CNet(
+                                        global_net[i].s_dim,
+                                        global_net[i].a_dim,
+                                        device=device,
+                                        ).to(device) for i in range(first_decision_num, agent_num)]
         self.env = env
         self.device = device
         self.updater = None
+        self.take_inTurn = take_action_in_turn
+        self.first_descision_num = first_decision_num
 
     def run(self):
         x_s = 0
@@ -274,7 +286,8 @@ class SocialInfluence(mp.Process):
         self.updater = Updater(5, self.device)
         while self.g_ep.value < 100:
             s = self.env.reset()
-            buffer_s, buffer_a, buffer_r = [], [], []
+            buffer_s, buffer_r = [], []
+            buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
             self.updater.get_first_state(s)
             ep_r = [0. for i in range(self.agent_num)]
             for step in range(1, 1001):
@@ -284,55 +297,72 @@ class SocialInfluence(mp.Process):
                 #     if not os.path.exists(path):
                 #         os.mkdir(path)
                 #     self.env.render(path)
-                s0 = self.lnet[0].CNN_preprocess(v_wrap(self.updater.seq_obs(0),device=self.device))
-                a0, prob0 = self.lnet[0].choose_action(s0[:,None,:], True)
-                a0_exe = [a0]
-                a0 = self.one_hot(self.action_dim, a0)
 
+                s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.agent_num)]
+                a_preD = []
+                if self.take_inTurn:
+                    for i in range(self.first_descision_num):
+                        a_preD.append(self.lnet[i].choose_action(s_pre[i][:, None, :], True))
+
+                '''
+                # use it in social influence
                 if step == 1:
                     self.updater.get_first_act_inf(a0.unsqueeze(0))
                 else:
                     self.updater.get_new_act_inf = a0.unsqueeze(0)
+                '''
 
-                s = []
-                for i in range(1, self.agent_num):
-                    s.append(torch.cat((self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)),
-                                v_wrap(self.updater.seq_act())),-1).unsqueeze(1).to(self.device))
-                # s = [torch.cat((self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)),
-                #                 v_wrap(self.updater.seq_act())),-1).to(self.device)
-                #                 for i in range(1, self.agent_num)]
-                s = [s0.unsqueeze(1)] + s
-                a = [self.lnet[i].choose_action(s[i], True) for i in range(1, self.agent_num)]
-                prob = [elem[1] for elem in a]
-                a_exe = a0_exe + [elem[0] for elem in a]
-                a = [a0] + [self.one_hot(self.action_dim, elem[0]) for elem in a]
-                s_, r, done, _ = self.env.step(a_exe,need_argmax=False)
+                s = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num, self.agent_num)]
+                s = self.modify_obs(None, seq_obs=s,)
+
+                a = [self.lnet[i].choose_action(s[i][:, None, :], True) for i in range(self.first_descision_num, self.agent_num)]
+                a = a_preD + a
+                a_int = [a[i][0] for i in range(self.agent_num)]
+                a_prob = [a[i][1] for i in range(self.agent_num)]
+                a_onehot = [self.one_hot(dim=self.action_dim, index=a_int[i], Tensor=True) for i in range(self.agent_num)]
+                s_, r, done, _ = self.env.step(a_int,need_argmax=False)
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
-                x,_ = self._influencer_reward(r[0], self.lnet[1:], prob0, a0_exe, s[1:], prob, step)
+
+                '''
+                # use in social influence 
+                x,_ = self._influencer_reward(r[0], self.lnet[1:], a_prob[0], a_int[0], s[1:], a_prob[1:], step)
                 r = [float(i) for i in r]
                 x_s += _.cpu().numpy()
                 r[0] += x.detach().cpu().numpy()
-                buffer_a.append(a_exe)
+                '''
+
+                buffer_a_int.append(a_int)
+                buffer_a_prob.append(a_prob)
+                buffer_a_onehot.append(a_onehot)
                 buffer_s.append(s)
                 buffer_r.append(r)
 
                 if step % 5 == 0:  # update global and assign to local net
                     _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
-                    _s0 = self.lnet[0].CNN_preprocess(_s[0])
-                    a0 = self.lnet[0].choose_action(_s0[:,None,:], False)
-                    a0 = self.one_hot(self.action_dim, a0)
-                    a0 = self.updater.get_next_innfluencer_act(a0.unsqueeze(0), require_tensor=True)
-                    _s = [torch.cat((self.lnet[i].CNN_preprocess(_s[i], ),a0),-1).to(self.device) for i in range(1, self.agent_num)]
-                    _s = [_s0] + _s
+                    if self.take_inTurn:
+                        _s_pre = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num)]
+                        _a_pre = [self.lnet.choose_action(_s_pre[i][:, None, :], False)]
+                        _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num, self.agent_num)]
+                        _s = _s_pre + _s
+                    else:
+                        _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.agent_num)]
+
+                    _s = self.modify_obs(None, seq_obs=_s)
+
                     # sync
                     done = [False for i in range(self.agent_num)]
-                    [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i],_s[i], buffer_s, buffer_a, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
                     [self.scheduler_lr[i].step() for i in range(self.agent_num)]
-                    buffer_s, buffer_a, buffer_r = [], [], []
+                    [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i], _s[i], buffer_s, buffer_a_int, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
+                    buffer_s, buffer_r = [], []
+                    buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
                 s = s_
                 self.updater.get_new_state = s
             print('ep%d'%ep, self.name, sum(ep_r), x_s)
+
+            '''
+            # use in social influence 
             x_s = 0
+            '''
             ep+=1
             if self.name == "w00" and self.multiProcess:
                 self.sender.send([sum(ep_r),ep])
@@ -364,7 +394,7 @@ class SocialInfluence(mp.Process):
             x = p_a[i][0]
             y = _a.detach()
             p_cf.append(torch.nn.functional.kl_div(torch.log(x),y,reduction="sum"))
-        return 0.5*e + 0.5*self._sum(p_cf), self._sum(p_cf)
+        return 1*e + 0*self._sum(p_cf), self._sum(p_cf)
 
     def _sum(self, tar):
         sum = 0
@@ -381,6 +411,16 @@ class SocialInfluence(mp.Process):
             one_hot = np.zeros(dim)
             one_hot[index] = 1.
             return one_hot
+
+    def modify_obs(self, agents, seq_obs, **kwargs):
+        '''
+        put in agents that need to take as inputs the action or probability distribution of others
+        and their original observation. returns the synthesis observation. Could be modified.
+        inputs:
+            --a list of agents
+            --a function that returns the sequential observation
+        '''
+        return seq_obs
 
 class IAC_RNN(IAC):
     '''
