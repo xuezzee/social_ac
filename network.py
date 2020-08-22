@@ -137,6 +137,10 @@ class Centralised_Critic(nn.Module):
 
 
 class A3CNet(nn.Module):
+    '''
+    该网络为最新A3C框架的基本网络，整合了actor和critic网络
+    CNN_preprocess只用于actor，critic的输入为经过actor CNN处理后的张量
+    '''
     def __init__(self, s_dim, a_dim, CNN=False, device='cpu'):
         super(A3CNet, self).__init__()
         self.s_dim = s_dim
@@ -173,7 +177,6 @@ class A3CNet(nn.Module):
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
         pi2 = torch.relu(self.pi2(pi1))
-        # temp = pi2[:,None,:]
         pi3, _ = self.LSTM_policy(pi2)
         logits = self.pi_out(pi3[-1, :, :])
         v1 = torch.relu(self.v1(x))

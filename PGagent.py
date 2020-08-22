@@ -249,6 +249,20 @@ class A3C(mp.Process):
         self.res_queue.put(None)
 
 class SocialInfluence(mp.Process):
+    '''
+    如果需要有某些agent先做决策，则将其放到agent list的最前面，将需要先做决策的agent的数
+    量写入first_decision_num, take_action_in_turn改为True
+
+    同时如果某些agent在采取动作的时候，需要基于其他agent的输出或者观测，需要实现最下面的
+    modify_obs方法
+
+    agent的返回的动作需要是形如（a(int), prob(类型根据自己需要决定)）的元组
+    CNN_preprocess返回的是flatten的张量，该返回值会被存入buffer以供更新使用，
+    critic网络不再使用CNN
+
+    updater中会将state转换为时序序列，序列长度在初始化updater时定义，
+    updater中的pull_and_pull为更新使用
+    '''
     def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name,
                  state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True, device="cpu",
                  take_action_in_turn = False, first_decision_num = 0):
@@ -288,6 +302,8 @@ class SocialInfluence(mp.Process):
             s = self.env.reset()
             buffer_s, buffer_r = [], []
             buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
+
+            '''updater需要根据初始state去初始化内部的时序序列'''
             self.updater.get_first_state(s)
             ep_r = [0. for i in range(self.agent_num)]
             for step in range(1, 1001):
@@ -297,7 +313,7 @@ class SocialInfluence(mp.Process):
                 #     if not os.path.exists(path):
                 #         os.mkdir(path)
                 #     self.env.render(path)
-
+                '''updater的seq_obs方法返回的是第i个agent对应的最新的时序序列，（RGB）格式基础上加seq'''
                 s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.agent_num)]
                 a_preD = []
                 if self.take_inTurn:
@@ -331,6 +347,7 @@ class SocialInfluence(mp.Process):
                 r[0] += x.detach().cpu().numpy()
                 '''
 
+                '''prob和onehot未使用，有需要可以使用'''
                 buffer_a_int.append(a_int)
                 buffer_a_prob.append(a_prob)
                 buffer_a_onehot.append(a_onehot)
@@ -403,6 +420,9 @@ class SocialInfluence(mp.Process):
         return sum
 
     def one_hot(self, dim, index, Tensor=True):
+        '''
+        将动作转换为onehot向量，index为int类型的动作，dim为action_dim
+        '''
         if Tensor:
             one_hot = torch.zeros(dim)
             one_hot[index] = 1.
