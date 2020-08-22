@@ -17,7 +17,7 @@ import torchsnooper
 import os
 import scipy.stats
 
-writer = Logger('./logsn')
+writer = Logger('./logsnx')
 
 
 class IAC():
@@ -295,10 +295,14 @@ class SocialInfluence(mp.Process):
         self.first_descision_num = first_decision_num
 
     def run(self):
+        summary = [[0,0] for i in range(1000)]
+        reward_pipe = [0 for i in range(1000)]
+        tot_step = 0
+        last_ep_rew = 0
         x_s = 0
         ep = 0
         self.updater = Updater(5, self.device)
-        while self.g_ep.value < 100:
+        while self.g_ep.value < 10000:
             s = self.env.reset()
             buffer_s, buffer_r = [], []
             buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
@@ -338,6 +342,14 @@ class SocialInfluence(mp.Process):
                 a_onehot = [self.one_hot(dim=self.action_dim, index=a_int[i], Tensor=True) for i in range(self.agent_num)]
                 s_, r, done, _ = self.env.step(a_int,need_argmax=False)
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
+
+                m = reward_pipe.pop(0)
+                summed_reward = sum(r)
+                last_ep_rew = last_ep_rew+summed_reward-m
+                summary.pop(0)
+                summary.append([last_ep_rew, tot_step, ])
+                reward_pipe.append(summed_reward)
+                tot_step += 1
 
                 '''
                 # use in social influence 
@@ -381,10 +393,9 @@ class SocialInfluence(mp.Process):
             x_s = 0
             '''
             ep+=1
-            if self.name == "w00" and self.multiProcess:
-                self.sender.send([sum(ep_r),ep])
-            if not self.multiProcess:
-                writer.scalar_summary("reward", sum(ep_r), ep)
+            # if self.multiProcess:
+            print(summary)
+            self.sender.send([sum(ep_r), ep, self.name, summary])
         if self.multiProcess:
             self.res_queue.put(None)
 

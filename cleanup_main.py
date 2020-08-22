@@ -8,7 +8,7 @@ from PGagent import A3C, SocialInfluence, IAC_RNN, influence_A3C
 from parallel_env_process import envs_dealer
 from MAAC.algorithms.attention_sac import AttentionSAC
 from MAAC.utils.buffer import ReplayBuffer
-from utils import env_wrapper, make_parallel_env, Logger, Runner, create_seq_obs
+from utils import env_wrapper, make_parallel_env, Logger, Runner, create_seq_obs, plot
 # from logger import Logger
 from network import A3CNet, A3CAgent
 from torch.utils.tensorboard import SummaryWriter
@@ -40,16 +40,17 @@ model_name = "pg_social"
 file_name = "/Users/xue/Desktop/Social_Law/saved_weight/" + model_name
 save_eps = 10
 ifsave_model = True
-logger = Logger('./logs6')
+logger = Logger('./logstest')
 
 
 def A3C_main_multiProcess():
-    n_agents = 5
+    n_agents = 2
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
     n_workers = mp.cpu_count()
     n_workers = 2
-    sender, recevier = mp.Pipe()
-
+    messager = [mp.Pipe() for i in range(n_workers)]
+    sender = [m[0] for m in messager]
+    receiver = [m[1] for m in messager]
     global_net = [A3CNet(675*2, 8, device=device).to(device)]
     global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents-1)]
     optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
@@ -65,13 +66,14 @@ def A3C_main_multiProcess():
                                675, 8,
                                n_agents,
                                scheduler_lr) for worker in range(n_workers)]
-    workers[0].sender = sender
+    for i in range(n_workers):
+        workers[i].sender = sender[i]
     for worker in workers:
         worker.start()
     res = []
     while True:
-        msg = recevier.recv()
-        logger.scalar_summary("reward", msg[0], msg[1])
+        msg = [rec.recv() for rec in receiver]
+        plot(msg, logger)
         # r = res_queue.get()
         # if r is not None:
         #     res.append(r)

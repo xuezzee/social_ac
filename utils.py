@@ -535,4 +535,20 @@ def create_seq_obs(seq, obs, l):   #TODO
     return seq
 
 
-
+def plot(data, logger):
+    def plot_per_step(d, name):
+        for i in range(len(d)):
+            logger.scalar_summary(name+':rew_per_step', d[i][0] ,d[i][1])
+    l = len(data)
+    reward = [data[i][0] for i in range(l)]
+    ep = [data[i][1] for i in range(l)]
+    name = [data[i][2] for i in range(l)]
+    reward_per_step = [data[i][-1] for i in range(l)]
+    [logger.scalar_summary(name[i], reward[i], ep[i]) for i in range(l)]
+    [plot_per_step(reward_per_step[i], name[i]) for i in range(l)]
+    mean = np.mean(reward)
+    std = np.std(reward)
+    # logger.scalar_summary('')
+    logger.scalar_summary('sum', mean/std, ep[0])
+    logger.scalar_summary('mean', mean, ep[0])
+    logger.scalar_summary('std', std, ep[0])
