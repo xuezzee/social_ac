@@ -218,64 +218,20 @@ class A3CNet(nn.Module):
         return torch.cat(entropy).unsqueeze(0).to(self.device)
 
 
-class LawNet(A3CNet):
-    def __init__(self, s_dim, a_dim, CNN=False, device='cpu'):
-        super(LawNet, self).__init__(s_dim, a_dim, CNN, device)
-        self.v_t1 = nn.Linear(s_dim, 32)
-        self.v_t2 = nn.Linear(32, 32)
-        self.LSTM_critic_t = nn.LSTM(
-            input_size=32,
-            hidden_size=32,
-            num_layers=1,
-        )
-        self.v_t3 = nn.Linear(32, 1)
-        self.optimizer = None
+class LawCritic(nn.Module):
+    def __init__(self, s_dim, a_dim, device='cpu'):
+        super(LawCritic, self).__init__()
+        self.s_dim = s_dim
+        self.a_dim = a_dim
+        self.device = device
 
-    def forward(self, x, ):
-        pi1 = torch.relu(self.pi1(x))
-        pi2 = torch.relu(self.pi2(pi1))
-        pi3, _ = torch.relu(self.LSTM_policy(pi2))
-        policy = self.pi_out(pi3[-1, :, :])
-        input_v = torch.cat(policy, x).to(self.device)
-        v1 = torch.relu(self.v1(input_v.detach(), ))
-        v2 = torch.relu(self.v2(v1))
-        v3, _ = torch.relu(self.LSTM_critic(v2))
-        value = self.v_out(v3[-1, :, :])
-        return policy, value
-
-    def target_v(self, x):
-        v1 = torch.relu(self.v_t1(x))
-        v2 = torch.relu(self.v_t2(v1))
-        v3 = torch.relu(self.LSTM_critic_t(v2)[1, :, :])
-        value = self.v_t3(v3)
-        return value
-
-    def get_parameter(self):
-        param = itertools(self.pi1.parameters(),
-                          self.pi2.parameters(),
-                          self.LSTM_policy.parameters(),
-                          self.pi_out.parameters(), )
-        return param
-
-    def choose_law(self, s, dist=False):
-        policy, _ = self.forward(s)
-        law = F.sigmoid(policy).data
-        return law
-
-    def masked_action(self, probs, s, dist=False):
-        self.eval()
-        law = self.choose_law(s)
-        masked_probs = torch.mul(probs.detach(), law)
-        masked_probs = masked_probs / masked_probs.sum()
-        m = self.distribution(masked_probs)
-        if not dist:
-            return m.sample().cpu().numpy()
-        else:
-            return m.sample().cpu().numpy()
-
-    def loss_func(self, s, a, v_t):
-        self.train()
-        policy, value = self.forward(s)
+class LawActor(nn.Module):
+    def __init__(self, s_dim, a_dim, a_lim, device='cpu'):
+        super(LawActor, self).__init__()
+        self.s_dim = s_dim
+        self.a_dim = a_dim
+        self.a_lim = a_lim
+        self.device = device
 
 
 class A3CAgent(nn.Module):

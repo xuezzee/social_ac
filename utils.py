@@ -167,6 +167,12 @@ class Updater():
     def get_new_act_inf(self, n_a):
         self._roll(n_a, 'a')
 
+    @property
+    def all_seq_states(self):
+        t = [s.cpu().numpy() for s in self.seq_state]
+        t = np.concatenate(t, axis=1)
+        return t
+
     def _roll(self, new, s_a):
         if s_a == 's':
             self.seq_state.pop(0)
@@ -246,10 +252,6 @@ class Updater():
         # pull global parameters
         lnet.load_state_dict(gnet.state_dict())
 
-    # def push_and_pull(self, opt, lnet, gnet, s_, gamma, i):
-    #     bs = [obs[i] for obs in self.obs_batch]
-    #     ba = [act[i] for act in self.act_batch]
-    #     br = [rew[i] for rew in self.rew_batch]
 
 def record(global_ep, global_ep_r, ep_r, res_queue, name):
     with global_ep.get_lock():
@@ -552,3 +554,4 @@ def plot(data, logger):
     logger.scalar_summary('sum', mean/std, ep[0])
     logger.scalar_summary('mean', mean, ep[0])
     logger.scalar_summary('std', std, ep[0])
+

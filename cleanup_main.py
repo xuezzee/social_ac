@@ -11,6 +11,7 @@ from MAAC.utils.buffer import ReplayBuffer
 from utils import env_wrapper, make_parallel_env, Logger, Runner, create_seq_obs, plot
 # from logger import Logger
 from network import A3CNet, A3CAgent
+from ddpg import DDPG
 from torch.utils.tensorboard import SummaryWriter
 
 # from envs.ElevatorENV import Lift
@@ -44,28 +45,35 @@ logger = Logger('./logstest')
 
 
 def A3C_main_multiProcess():
-    n_agents = 2
+    n_agents = 5
+    first_decision_agent = 1
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
     n_workers = mp.cpu_count()
     n_workers = 2
     messager = [mp.Pipe() for i in range(n_workers)]
     sender = [m[0] for m in messager]
     receiver = [m[1] for m in messager]
+    glaw = DDPG([15,15,3], 8, seq_len=4, device=device)
     global_net = [A3CNet(675*2, 8, device=device).to(device)]
-    global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents-1)]
+    global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents)]
     optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
     scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.9, last_epoch=-1) for i in range(n_agents)]
     envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
-    workers = [SocialInfluence(envs[worker],
-                               global_net,
-                               optimizer,
-                               global_ep,
-                               global_ep_r,
-                               res_queue,
-                               worker,
-                               675, 8,
-                               n_agents,
-                               scheduler_lr) for worker in range(n_workers)]
+    workers = [SocialInfluence(
+                   envs[worker],
+                   global_net,
+                   optimizer,
+                   global_ep,
+                   global_ep_r,
+                   res_queue,
+                   worker,
+                   675, 8,
+                   n_agents,
+                   scheduler_lr,
+                   # take_action_inTurn=True,
+                   # first_decision_num=first_decision_agent,
+                   glaw=glaw
+                   ) for worker in range(n_workers)]
     for i in range(n_workers):
         workers[i].sender = sender[i]
     for worker in workers:
@@ -73,7 +81,7 @@ def A3C_main_multiProcess():
     res = []
     while True:
         msg = [rec.recv() for rec in receiver]
-        plot(msg, logger)
+        # plot(msg, logger)
         # r = res_queue.get()
         # if r is not None:
         #     res.append(r)

@@ -12,6 +12,7 @@ import copy
 import itertools
 from collections import deque
 from shared_adam import SharedAdam
+from ddpg import DDPG
 import random
 import torchsnooper
 import os
@@ -265,7 +266,7 @@ class SocialInfluence(mp.Process):
     '''
     def __init__(self, env, global_net, optimizer, global_ep, global_ep_r, res_queue, name,
                  state_dim, action_dim, agent_num, scheduler_lr, multiProcess=True, device="cpu",
-                 take_action_in_turn = False, first_decision_num = 0):
+                 take_action_in_turn = False, first_decision_num = 0, glaw=None):
         if multiProcess:
             super(SocialInfluence, self).__init__()
         self.action_dim = action_dim
@@ -277,10 +278,12 @@ class SocialInfluence(mp.Process):
         self.GAMMA = 0.99
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = global_net, optimizer
+        self.glaw = glaw
         self.scheduler_lr = scheduler_lr
+        self.law = DDPG(glaw.state_dim, glaw.action_dim, seq_len=4, device=device)
         self.lnet = [A3CNet(
-                            global_net[0].s_dim,
-                            global_net[0].a_dim,
+                            global_net[i].s_dim,
+                            global_net[i].a_dim,
                             device=device,
                             ).to(device) for i in range(first_decision_num)]
         self.lnet = self.lnet + [A3CNet(
@@ -295,13 +298,15 @@ class SocialInfluence(mp.Process):
         self.first_descision_num = first_decision_num
 
     def run(self):
+        self.law.get_global_optimizer_network([self.glaw.critic_optimizer, self.glaw.actor_optimizer], [self.glaw.actor, self.glaw.critic])
         summary = [[0,0] for i in range(1000)]
         reward_pipe = [0 for i in range(1000)]
+        switch = [False, 0]
         tot_step = 0
         last_ep_rew = 0
         x_s = 0
         ep = 0
-        self.updater = Updater(5, self.device)
+        self.updater = Updater(4, self.device)
         while self.g_ep.value < 10000:
             s = self.env.reset()
             buffer_s, buffer_r = [], []
@@ -318,6 +323,9 @@ class SocialInfluence(mp.Process):
                 #         os.mkdir(path)
                 #     self.env.render(path)
                 '''updater的seq_obs方法返回的是第i个agent对应的最新的时序序列，（RGB）格式基础上加seq'''
+                s_law = self.law.CNN_preprocess(self.updater.all_seq_states).permute(1,0,2)
+                a_law = self.law.choose_action(s_law)
+                # print(a_law)
                 s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.agent_num)]
                 a_preD = []
                 if self.take_inTurn:
@@ -336,10 +344,16 @@ class SocialInfluence(mp.Process):
                 s = self.modify_obs(None, seq_obs=s,)
 
                 a = [self.lnet[i].choose_action(s[i][:, None, :], True) for i in range(self.first_descision_num, self.agent_num)]
+
                 a = a_preD + a
                 a_int = [a[i][0] for i in range(self.agent_num)]
                 a_prob = [a[i][1] for i in range(self.agent_num)]
                 a_onehot = [self.one_hot(dim=self.action_dim, index=a_int[i], Tensor=True) for i in range(self.agent_num)]
+
+                if self.glaw != None:
+                    a_int = self.law.mask_action(a_law, a_prob)
+                    # print(a_int)
+
                 s_, r, done, _ = self.env.step(a_int,need_argmax=False)
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
 
@@ -360,32 +374,48 @@ class SocialInfluence(mp.Process):
                 '''
 
                 '''prob和onehot未使用，有需要可以使用'''
-                buffer_a_int.append(a_int)
-                buffer_a_prob.append(a_prob)
-                buffer_a_onehot.append(a_onehot)
-                buffer_s.append(s)
-                buffer_r.append(r)
-
-                if step % 5 == 0:  # update global and assign to local net
+                if switch[0] or self.glaw == None:
+                    buffer_a_int.append(a_int)
+                    buffer_a_prob.append(a_prob)
+                    buffer_a_onehot.append(a_onehot)
+                    buffer_s.append(s)
+                    buffer_r.append(r)
+                else:
                     _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
-                    if self.take_inTurn:
-                        _s_pre = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num)]
-                        _a_pre = [self.lnet.choose_action(_s_pre[i][:, None, :], False)]
-                        _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num, self.agent_num)]
-                        _s = _s_pre + _s
-                    else:
-                        _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.agent_num)]
+                    self.law.replay_buffer.push((s_law.detach(), self.law.CNN_preprocess(_s).permute(1,0,2).detach(), a_law, r, np.float(False)))
 
-                    _s = self.modify_obs(None, seq_obs=_s)
+                if switch[0] or self.glaw == None:
+                    if step % 5 == 0:  # update global and assign to local net
+                        _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
+                        if self.take_inTurn:
+                            _s_pre = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num)]
+                            _a_pre = [self.lnet.choose_action(_s_pre[i][:, None, :], False)]
+                            _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num, self.agent_num)]
+                            _s = _s_pre + _s
+                        else:
+                            _s = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.agent_num)]
 
-                    # sync
-                    done = [False for i in range(self.agent_num)]
-                    [self.scheduler_lr[i].step() for i in range(self.agent_num)]
-                    [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i], _s[i], buffer_s, buffer_a_int, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
-                    buffer_s, buffer_r = [], []
-                    buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
+                        _s = self.modify_obs(None, seq_obs=_s)
+
+                        # sync
+                        done = [False for i in range(self.agent_num)]
+                        [self.scheduler_lr[i].step() for i in range(self.agent_num)]
+                        [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i], _s[i], buffer_s, buffer_a_int, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
+                        buffer_s, buffer_r = [], []
+                        buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
+                else:
+                    if step % 100 == 0:
+                        # print("update")
+                        # print(a_law)
+                        self.law.update()
+                        # for
+
                 s = s_
                 self.updater.get_new_state = s
+            switch[1] += 1
+            if switch[1] == 2:
+                switch[0] = not switch[0]
+                switch[1] = 0
             print('ep%d'%ep, self.name, sum(ep_r), x_s)
 
             '''
