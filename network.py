@@ -178,30 +178,31 @@ class A3CNet(nn.Module):
         pi1 = torch.relu(self.pi1(x))
         pi2 = torch.relu(self.pi2(pi1))
         _, (pi3, _) = self.LSTM_policy(pi2)
-        logits = self.pi_out(pi3[0])
+        logits = self.pi_out(torch.relu(pi3[0]))
         v1 = torch.relu(self.v1(x))
         v2 = torch.relu(self.v2(v1))
         _, (v3, _) = self.LSTM_critic(v2)
-        values = self.v_out(v3[0])
+        values = self.v_out(torch.relu(v3[0]))
         return logits, values
 
     def choose_action(self, s, dist=False):
         self.eval()
-        logits, _ = self.forward(s)
-        prob = F.softmax(logits, dim=1).data
+        logist, _ = self.forward(s)
+        prob = F.softmax(logist, dim=1).data
         m = self.distribution(prob)
         if not dist:
-            return m.sample().cpu().numpy()[0]
+            return m.sample().cpu().numpy()[0], logist
         else:
             return m.sample().cpu().numpy()[0], prob
 
-    def loss_func(self, s, a, v_t):
+    def loss_func(self, s, a, v_t, law):
         self.train()
-        logits, values = self.forward(s.to(self.device))
+        logist, values = self.forward(s.to(self.device))
         td = v_t - values
         c_loss = td.pow(2)
+        logist = torch.add(logist, law.detach())
 
-        probs = F.softmax(logits, dim=1)
+        probs = F.softmax(logist, dim=1)
         m = self.distribution(probs)
         exp_v = m.log_prob(a) * (td.detach() + 0.001 * self.entropy(probs).detach())
         a_loss = -exp_v
@@ -218,20 +219,67 @@ class A3CNet(nn.Module):
         return torch.cat(entropy).unsqueeze(0).to(self.device)
 
 
-class LawCritic(nn.Module):
+class A3CLaw(A3CNet):
     def __init__(self, s_dim, a_dim, device='cpu'):
-        super(LawCritic, self).__init__()
-        self.s_dim = s_dim
-        self.a_dim = a_dim
-        self.device = device
+        s_dim = 150
+        super().__init__(s_dim, a_dim, device='cpu')
+        self.Pool = nn.MaxPool2d(
+            kernel_size=3,
+            stride=3,
+        )
+        self.v1 = nn.Linear(5 * s_dim, 32)
 
-class LawActor(nn.Module):
-    def __init__(self, s_dim, a_dim, a_lim, device='cpu'):
-        super(LawActor, self).__init__()
-        self.s_dim = s_dim
-        self.a_dim = a_dim
-        self.a_lim = a_lim
-        self.device = device
+    def CNN_preprocess(self, x, width=15, height=15):
+        # x = x.reshape(-1,3,width,height)
+        x = torch.relu(self.conv1(x))
+        x = self.Pool(x)
+        return torch.flatten(x, start_dim=-3, end_dim=-1)
+
+    def forward(self, x):
+        pi1 = torch.relu(self.pi1(x))
+        pi2 = torch.relu(self.pi2(pi1))
+        _, (pi3, _) = self.LSTM_policy(pi2)
+        logits = self.pi_out(torch.relu(pi3[0]))
+        # v1 = torch.relu(self.v1(x))
+        # v2 = torch.relu(self.v2(v1))
+        # _, (v3, _) = self.LSTM_critic(v2)
+        # values = self.v_out(v3[0])
+        return logits
+
+    def value(self, x):
+        v1 = torch.relu(self.v1(x))
+        v2 = torch.relu(self.v2(v1))
+        _, (v3, _) = self.LSTM_critic(v2)
+        values = self.v_out(torch.relu(v3[0]))
+        return values
+
+    def choose_action(self, s, agentsAct, dist=False):
+        self.eval()
+        logist = self.forward(s)
+        logist = torch.add(torch.tanh(logist), agentsAct.detach())
+        prob = F.softmax(logist, dim=1).data
+        # prob = torch.mul(prob, agentsAct)
+        # prob = prob/sum(prob)
+        m = self.distribution(prob)
+        if not dist:
+            return logist.data.numpy(), m.sample().cpu().numpy()[0]
+        else:
+            return m.sample().cpu().numpy()[0], prob
+
+    def loss_func(self, s, a, v_t, agentsAct):
+        self.train()
+        logits = self.forward(s[:,:,:self.s_dim].to(self.device))
+        values = self.value(s)
+        logits = torch.add(torch.tanh(logits), agentsAct)
+        td = v_t - values
+        c_loss = td.pow(2)
+
+        probs = F.softmax(logits, dim=1)
+        m = self.distribution(probs)
+        exp_v = m.log_prob(a) * (td.detach() + 0.001 * self.entropy(probs).detach())
+        a_loss = -exp_v
+        total_loss = (c_loss + a_loss).mean()
+        return total_loss
 
 
 class A3CAgent(nn.Module):
@@ -250,19 +298,21 @@ class A3CAgent(nn.Module):
             nn.Linear(self.input_size, 32), nn.ReLU(),
             nn.Linear(32, 32), nn.ReLU(),
             nn.LSTM(input_size=32,
-                    hidden_size=act_dim,
+                    hidden_size=32,
                     num_layers=1)
         )
+        self.policy_out = nn.Linear(32, 32)
         self.critic = nn.Sequential(
             nn.Linear(self.critic_size, 32), nn.ReLU(),
             nn.Linear(32, 32), nn.ReLU(),
             nn.LSTM(input_size=32,
-                    hidden_size=1,
+                    hidden_size=32,
                     num_layers=1)
         )
+        self.critic_out = nn.Linear(32, 1)
         self.logist = None
-        self.optimizerA = torch.optim.Adam(itertools.chain(self.convA.parameters(), self.policy.parameters()), lr=0.001)
-        self.optimizerC = torch.optim.Adam(itertools.chain(self.convC.parameters(), self.policy.parameters()), lr=0.001)
+        self.optimizerA = torch.optim.Adam(itertools.chain(self.convA.parameters(), self.policy.parameters(), self.policy_out.parameters()), lr=0.001)
+        self.optimizerC = torch.optim.Adam(itertools.chain(self.convC.parameters(), self.policy.parameters(), self.critic_out.parameters()), lr=0.001)
         self.lr_scheduler = None
         self.seq_len = seq_len
         self.gamma = gamma
@@ -281,8 +331,8 @@ class A3CAgent(nn.Module):
         x = x.flatten(start_dim=1, end_dim=-1)
         if not self.influencer:
             x = torch.cat((x, act), dim=1)
-        x = self.policy(x.reshape((self.seq_len, -1, self.input_size)))[0][-1, :,
-            :]  # change if the size of cell changed
+        _, (x,_) = self.policy(x.reshape((self.seq_len, -1, self.input_size)))  # change if the size of cell changed
+        x = self.policy_out(torch.relu(x[0]))
         prob = torch.softmax(x, -1)
         logist = torch.log_softmax(x, -1)
         return prob, logist
@@ -290,8 +340,8 @@ class A3CAgent(nn.Module):
     def value(self, input):  # TODO
         # self.train()
         x = self.convC(input.reshape(-1, self.channel, self.width, self.height))
-        v = self.critic(torch.flatten(x, start_dim=1, end_dim=-1).reshape(self.seq_len, -1, self.critic_size))[0][-1, :,
-            :]
+        _, (x, _) = self.critic(torch.flatten(x, start_dim=1, end_dim=-1).reshape(self.seq_len, -1, self.critic_size))
+        v = self.critic_out(torch.relu(x[0]))
         return v
 
     def loss(self, sample):

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
-from network import Actor, Critic, CNN_preprocess, Centralised_Critic, ActorLaw, A3CNet, CriticRNN, ActorRNN
+from network import Actor, Critic, CNN_preprocess, Centralised_Critic, ActorLaw, A3CNet, CriticRNN, ActorRNN, A3CLaw
 from utils import v_wrap, set_init, record, Logger, categorical_sample, Updater
 import copy
 import itertools
@@ -20,6 +20,11 @@ import scipy.stats
 
 writer = Logger('./logsnx')
 
+
+def change_order(input, i):
+    input = [s.clone() for s in input]
+    x = input.pop(i)
+    return [x] + input
 
 class IAC():
     def __init__(self, action_dim, state_dim, agentParam, useLaw, useCenCritc, num_agent, CNN=False, width=None,
@@ -277,10 +282,14 @@ class SocialInfluence(mp.Process):
         self.multiProcess = multiProcess
         self.GAMMA = 0.99
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
-        self.gnet, self.opt = global_net, optimizer
+        self.gnet, self.opt, self.opt_law = global_net, optimizer[:-1], optimizer[-1]
         self.glaw = glaw
         self.scheduler_lr = scheduler_lr
-        self.law = DDPG(glaw.state_dim, glaw.action_dim, seq_len=4, device=device)
+        self.law = A3CLaw(
+                          glaw.s_dim,
+                          glaw.a_dim,
+                          device=device,
+                         ).to(device)
         self.lnet = [A3CNet(
                             global_net[i].s_dim,
                             global_net[i].a_dim,
@@ -298,12 +307,9 @@ class SocialInfluence(mp.Process):
         self.first_descision_num = first_decision_num
 
     def run(self):
-        self.law.get_global_optimizer_network([self.glaw.critic_optimizer, self.glaw.actor_optimizer],
-                                              [self.glaw.actor, self.glaw.critic],
-                                              self.glaw.lr_scheduler)
         summary = [[0,0] for i in range(1000)]
         reward_pipe = [0 for i in range(1000)]
-        switch = [False, 0]
+        switch = [True, 0]
         tot_step = 0
         last_ep_rew = 0
         x_s = 0
@@ -312,7 +318,7 @@ class SocialInfluence(mp.Process):
         while self.g_ep.value < 10000:
             s = self.env.reset()
             buffer_s, buffer_r = [], []
-            buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
+            buffer_a_int, buffer_a_logist, buffer_a_onehot = [], [], []
 
             '''updater需要根据初始state去初始化内部的时序序列'''
             self.updater.get_first_state(s)
@@ -325,11 +331,6 @@ class SocialInfluence(mp.Process):
                         os.mkdir(path)
                     self.env.render(path)
                 '''updater的seq_obs方法返回的是第i个agent对应的最新的时序序列，（RGB）格式基础上加seq'''
-                s_law = self.law.CNN_preprocess(self.updater.all_seq_states).permute(1,0,2)
-                a_law = self.law.choose_action(s_law)
-                if step % 500 == 0:
-                    print("a_law:",a_law)
-                # print(a_law)
                 s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num)]
                 a_preD = []
                 if self.take_inTurn:
@@ -347,15 +348,18 @@ class SocialInfluence(mp.Process):
                 s = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num, self.agent_num)]
                 s = self.modify_obs(None, seq_obs=s,)
 
-                a = [self.lnet[i].choose_action(s[i].unsqueeze(1), True) for i in range(self.first_descision_num, self.agent_num)]
+                a = [self.lnet[i].choose_action(s[i].unsqueeze(1), False) for i in range(self.first_descision_num, self.agent_num)]
 
                 a = a_preD + a
                 a_int = [a[i][0] for i in range(self.agent_num)]
-                a_prob = [a[i][1] for i in range(self.agent_num)]
+                a_logist = [a[i][1] for i in range(self.agent_num)]
                 a_onehot = [self.one_hot(dim=self.action_dim, index=a_int[i], Tensor=True) for i in range(self.agent_num)]
 
                 if self.glaw != None:
-                    a_int = self.law.mask_action(a_law, a_prob)
+                    law_s = [self.law.CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num, self.agent_num)]
+                    a_int = [self.law.choose_action(law_s[i].unsqueeze(1), a_logist[i]) for i in range(self.first_descision_num, self.agent_num)]
+                    mask = [mask[0] for mask in a_int]
+                    a_int = [a[1] for a in a_int]
 
                 if step % 500 == 0:
                     print('a_int:',a_int)
@@ -382,18 +386,20 @@ class SocialInfluence(mp.Process):
                 '''prob和onehot未使用，有需要可以使用'''
                 if switch[0] or self.glaw == None:
                     buffer_a_int.append(a_int)
-                    buffer_a_prob.append(a_prob)
+                    buffer_a_logist.append(mask)
                     buffer_a_onehot.append(a_onehot)
                     buffer_s.append(s)
                     buffer_r.append(r)
                 else:
-                    _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
-                    # r = np.array([0.85*r[i]+0.15*(sum(r)-r[i]) for i in range(len(r))])
-                    self.law.replay_buffer.push((s_law.detach(), self.law.CNN_preprocess(_s).permute(1,0,2).detach(), a_law, sum(r), np.float(False)))
+                    buffer_a_int.append(a_int)
+                    buffer_a_logist.append(a_logist)
+                    buffer_a_onehot.append(a_onehot)
+                    buffer_s.append([torch.cat(change_order(law_s, i), dim=-1) for i in range(self.agent_num)])
+                    buffer_r.append([sum(r) for i in r])
 
+                _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
                 if switch[0] or self.glaw == None:
                     if step % 5 == 0:  # update global and assign to local net
-                        _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
                         if self.take_inTurn:
                             _s_pre = [self.lnet[i].CNN_preprocess(_s[i]) for i in range(self.first_descision_num)]
                             _a_pre = [self.lnet.choose_action(_s_pre[i][:, None, :], False)]
@@ -407,20 +413,29 @@ class SocialInfluence(mp.Process):
                         # sync
                         done = [False for i in range(self.agent_num)]
                         [self.scheduler_lr[i].step() for i in range(self.agent_num)]
-                        [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i], _s[i], buffer_s, buffer_a_int, buffer_r, self.GAMMA, i) for i in range(self.agent_num)]
+                        [self.updater.push_and_pull(self.opt[i], self.lnet[i], self.gnet[i], done[i], _s[i], buffer_s, buffer_a_int, buffer_r, buffer_a_logist, self.GAMMA, i) for i in range(self.agent_num)]
                         buffer_s, buffer_r = [], []
-                        buffer_a_int, buffer_a_prob, buffer_a_onehot = [], [], []
+                        buffer_a_int, buffer_a_logist, buffer_a_onehot = [], [], []
                 else:
-                    if step % 100 == 0:
+                    if step % 5 == 0:
                         # print("update")
                         # print(a_law)
-                        self.law.update()
-                        # for
+                        _s = [self.law.CNN_preprocess(_s[i]) for i in range(self.agent_num)]
+                        loss = [self.updater.law_update(self.opt_law, self.law, self.glaw, done[i], torch.cat(change_order(_s, i), dim=1), buffer_s, buffer_a_int, buffer_r, buffer_a_logist,self.GAMMA, i) for i in range(self.agent_num)]
+                        loss = sum(loss)
+                        self.opt_law.zero_grad()
+                        loss.backward()
+                        for lp, gp in zip(self.law.parameters(), self.glaw.parameters()):
+                            gp._grad = lp.grad
+                        self.opt_law.step()
+                        self.law.load_state_dict(self.glaw.state_dict())
+                        buffer_s, buffer_r = [], []
+                        buffer_a_int, buffer_a_logist, buffer_a_onehot = [], [], []
 
                 s = s_
                 self.updater.get_new_state = s
             switch[1] += 1
-            if switch[1] == 2:
+            if switch[1] == 3:
                 switch[0] = not switch[0]
                 switch[1] = 0
             print('ep%d'%ep, self.name, sum(ep_r), x_s)

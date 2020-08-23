@@ -70,7 +70,7 @@ class Replay_buffer():
     https://github.com/openai/baselines/blob/master/baselines/deepq/replay_buffer.py
     Expects tuples of (state, next_state, action, reward, done)
     '''
-    def __init__(self, max_size=100):
+    def __init__(self, max_size=1000):
         self.storage = []
         self.max_size = max_size
         self.ptr = 0
@@ -90,11 +90,14 @@ class Replay_buffer():
             X, Y, U, R, D = self.storage[i]
             x.append(np.array(X, copy=False))
             y.append(np.array(Y, copy=False))
+            # x.append(torch.Tensor(X))
+            # x.append(torch.Tensor(Y))
             u.append(np.array(U, copy=False))
             r.append(np.array(R, copy=False))
             d.append(np.array(D, copy=False))
 
         return np.array(x), np.array(y), np.array(u), np.array(r).reshape(-1, 1), np.array(d).reshape(-1, 1)
+        # return torch.cat(x), torch.cat(y), np.array(u), np.array(r).reshape(-1, 1), np.array(d).reshape(-1, 1)
 
 
 class Actor(nn.Module):
@@ -136,7 +139,7 @@ class Actor(nn.Module):
         x = F.relu(self.l2(x))
         _, (x, _) = self.LSTM(x)
         x = torch.relu(x[0])
-        x = torch.sigmoid(self.l_out(x))
+        x = torch.relu(self.l_out(x))
         return x
 
 
@@ -167,11 +170,11 @@ class Critic(nn.Module):
     def forward(self, s, a):
         x = torch.relu(self.l1(s))
         x = torch.relu(self.l2(x))
-        x = torch.relu(self.LSTM(x)[0][-1, :, :])
+        _, (x, _) = self.LSTM(x)
         a = torch.relu(self.l1_a(a))
-        a = torch.relu(self.l2_a(a))
-        x = torch.add(x, a)
-        x = self.l_out(x)
+        a = self.l2_a(a)
+        x = torch.relu(torch.add(x, a))
+        x = self.l_out(x[0])
         return x
 
 
@@ -185,18 +188,18 @@ class DDPG(object):
         self.actor = Actor(state_dim, action_dim, max_action).to(device)
         self.actor_target = Actor(state_dim, action_dim, max_action).to(device)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-5)
 
         self.critic = Critic(150*self.num_agents, action_dim*self.num_agents).to(device)
         self.critic_target = Critic(150*self.num_agents, action_dim*self.num_agents).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-3)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-6)
         self.replay_buffer = Replay_buffer()
         # self.writer = SummaryWriter(directory)
 
         self.lr_scheduler = {
-            'optC':torch.optim.lr_scheduler.StepLR(self.critic_optimizer, step_size=2000, gamma=0.99, last_epoch=-1),
-            'optA':torch.optim.lr_scheduler.StepLR(self.actor_optimizer, step_size=2000, gamma=0.99, last_epoch=-1)
+            'optC':torch.optim.lr_scheduler.StepLR(self.critic_optimizer, step_size=20000, gamma=0.99, last_epoch=-1),
+            'optA':torch.optim.lr_scheduler.StepLR(self.actor_optimizer, step_size=20000, gamma=0.99, last_epoch=-1)
         }
         self.num_critic_update_iteration = 0
         self.num_actor_update_iteration = 0
@@ -227,10 +230,12 @@ class DDPG(object):
     def update(self):
         for it in range(args.update_iteration):
             # Sample replay buffer
-            x, y, u, r, d = self.replay_buffer.sample(50)
+            x, y, u, r, d = self.replay_buffer.sample(100)
             state = torch.FloatTensor(x).to(device)
+            state = self.CNN_preprocess(state.flatten(0,1)).reshape((100*self.num_agents, self.seq_len, -1)).permute(1,0,2)
             action = torch.FloatTensor(u).to(device)
             next_state = torch.FloatTensor(y).to(device)
+            next_state = self.CNN_preprocess(next_state.flatten(0,1)).reshape((100*self.num_agents, self.seq_len, -1)).permute(1,0,2)
             done = torch.FloatTensor(1-d).to(device)
             reward = torch.FloatTensor(r).to(device)
 
@@ -242,13 +247,13 @@ class DDPG(object):
 
             # Compute the target Q value
             action = action.flatten(start_dim=0, end_dim=1)
-            state = transform_state(state)
-            next_state = transform_state(next_state)
+            # state = transform_state(state)
+            # next_state = transform_state(next_state)
 
             actions = self.actor_target(next_state).reshape(-1, self.num_agents*self.action_dim)
             action = action.reshape(-1, self.num_agents*self.action_dim)
-            next_state_copy = next_state.reshape(self.seq_len, -1, 150*self.num_agents).clone()
-            state_copy = state.reshape(self.seq_len, -1, 150*self.num_agents).clone()
+            next_state_copy = next_state.reshape(self.seq_len, -1, 150*self.num_agents).clone().detach()
+            state_copy = state.reshape(self.seq_len, -1, 150*self.num_agents).clone().detach()
             # print()
             # next_state =
             target_Q = self.critic_target(next_state_copy, actions)
@@ -296,10 +301,12 @@ class DDPG(object):
     def mask_action(self, mask, act):
         if not isinstance(mask, torch.Tensor):
             mask = torch.Tensor(mask)
+        # mask = (torch.sign(mask) + 1)/2 + 0.01
 
-        test = [torch.mul(mask[i], act[i]) for i in range(len(act))]
-        test2 = [torch.mul(mask[i], act[i])[0].sum() for i in range(len(act))]
+        # test = [torch.mul(mask[i], act[i]) for i in range(len(act))]
+        # test2 = [torch.mul(mask[i], act[i])[0].sum() for i in range(len(act))]
         masked_action = torch.cat([torch.mul(mask[i], act[i])/torch.mul(mask[i], act[i])[0].sum() for i in range(len(act))])
+        # print(masked_action)
         m = Categorical(masked_action)
         a = m.sample()
         return a.data.cpu().numpy()

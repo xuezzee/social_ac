@@ -10,9 +10,10 @@ from MAAC.algorithms.attention_sac import AttentionSAC
 from MAAC.utils.buffer import ReplayBuffer
 from utils import env_wrapper, make_parallel_env, Logger, Runner, create_seq_obs, plot
 # from logger import Logger
-from network import A3CNet, A3CAgent
+from network import A3CNet, A3CAgent, A3CLaw
 from ddpg import DDPG
 from torch.utils.tensorboard import SummaryWriter
+from shared_adam import SharedAdam
 
 # from envs.ElevatorENV import Lift
 
@@ -41,7 +42,7 @@ model_name = "pg_social"
 file_name = "/Users/xue/Desktop/Social_Law/saved_weight/" + model_name
 save_eps = 10
 ifsave_model = True
-logger = Logger('./logs3')
+logger = Logger('./logs0')
 
 
 def A3C_main_multiProcess():
@@ -53,12 +54,13 @@ def A3C_main_multiProcess():
     messager = [mp.Pipe() for i in range(n_workers)]
     sender = [m[0] for m in messager]
     receiver = [m[1] for m in messager]
-    glaw = DDPG([15,15,3], 8, seq_len=4, device=device)
-    global_net = [A3CNet(675*2, 8, device=device).to(device)]
-    global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents)]
-    optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
+    glaw = A3CLaw(150, 9, device=device)
+    law_optimizer = SharedAdam(glaw.parameters(), lr=0.001)
+    global_net = [A3CNet(675*2, 9, device=device).to(device)]
+    global_net = global_net + [A3CNet(675*2, 9, device=device).to(device) for i in range(n_agents)]
+    optimizer = [SharedAdam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)] + [law_optimizer]
     scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=2000, gamma=0.99, last_epoch=-1) for i in range(n_agents)]
-    envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
+    envs = [env_wrapper(CleanupEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
     workers = [SocialInfluence(
                    envs[worker],
                    global_net,
@@ -67,7 +69,7 @@ def A3C_main_multiProcess():
                    global_ep_r,
                    res_queue,
                    worker,
-                   675, 8,
+                   675, 9,
                    n_agents,
                    scheduler_lr,
                    # take_action_inTurn=True,

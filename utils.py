@@ -219,10 +219,11 @@ class Updater():
         else:
             return self.seq_act_inf[1:] + [next_act]
 
-    def push_and_pull(self, opt, lnet, gnet, done, s_, bs, ba, br, gamma, i):
+    def push_and_pull(self, opt, lnet, gnet, done, s_, bs, ba, br, bl, gamma, i):
         bs = [s[i].unsqueeze(1) for s in bs]
         ba = [a[i] for a in ba]
         br = [r[i] for r in br]
+        bl = [l[i] for l in bl]
         if done:
             v_s_ = 0.               # terminal
         else:
@@ -240,7 +241,46 @@ class Updater():
         loss = lnet.loss_func(
             ca,
             v_wrap(np.array(ba), dtype=np.int64, device=self.device) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba),device=self.device),
-            v_wrap(np.array(buffer_v_target)[:, None],device=self.device))
+            v_wrap(np.array(buffer_v_target)[:, None],device=self.device),
+            v_wrap(np.concatenate(bl, axis=0), dtype=np.int64, device=self.device)
+            )
+
+        # calculate local gradients and push local parameters to global
+        opt.zero_grad()
+        loss.backward()
+        for lp, gp in zip(lnet.parameters(), gnet.parameters()):
+            gp._grad = lp.grad
+        opt.step()
+
+        # pull global parameters
+        lnet.load_state_dict(gnet.state_dict())
+
+    def law_update(self, opt, lnet, gnet, done, s_, bs, ba, br, bl, gamma, i):
+        bs = [s[i].unsqueeze(1) for s in bs]
+        ba = [a[i] for a in ba]
+        br = [r[i] for r in br]
+        bl = [l[i] for l in bl]
+        if done:
+            v_s_ = 0.               # terminal
+        else:
+            # v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
+            v_s_ = lnet.value(s_.unsqueeze(1))
+            v_s_ = v_s_.data.cpu().numpy()[0, 0]
+
+        buffer_v_target = []
+        for r in br[::-1]:    # reverse buffer r
+            v_s_ = r + gamma * v_s_
+            buffer_v_target.append(v_s_)
+        buffer_v_target.reverse()
+        # ca = v_wrap(np.vstack(bs))
+        ca = torch.cat(bs,axis=1).to(self.device)
+        loss = lnet.loss_func(
+            ca,
+            v_wrap(np.array(ba), dtype=np.int64, device=self.device) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba),device=self.device),
+            v_wrap(np.array(buffer_v_target)[:, None],device=self.device),
+            bl[0].detach())
+
+        return loss
 
         # calculate local gradients and push local parameters to global
         opt.zero_grad()
