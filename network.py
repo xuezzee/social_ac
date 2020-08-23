@@ -177,12 +177,12 @@ class A3CNet(nn.Module):
     def forward(self, x):
         pi1 = torch.relu(self.pi1(x))
         pi2 = torch.relu(self.pi2(pi1))
-        pi3, _ = self.LSTM_policy(pi2)
-        logits = self.pi_out(pi3[-1, :, :])
+        _, (pi3, _) = self.LSTM_policy(pi2)
+        logits = self.pi_out(pi3[0])
         v1 = torch.relu(self.v1(x))
         v2 = torch.relu(self.v2(v1))
-        v3, _ = self.LSTM_critic(v2)
-        values = self.v_out(v3[-1, :, :])
+        _, (v3, _) = self.LSTM_critic(v2)
+        values = self.v_out(v3[0])
         return logits, values
 
     def choose_action(self, s, dist=False):

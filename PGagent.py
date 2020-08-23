@@ -298,7 +298,9 @@ class SocialInfluence(mp.Process):
         self.first_descision_num = first_decision_num
 
     def run(self):
-        self.law.get_global_optimizer_network([self.glaw.critic_optimizer, self.glaw.actor_optimizer], [self.glaw.actor, self.glaw.critic])
+        self.law.get_global_optimizer_network([self.glaw.critic_optimizer, self.glaw.actor_optimizer],
+                                              [self.glaw.actor, self.glaw.critic],
+                                              self.glaw.lr_scheduler)
         summary = [[0,0] for i in range(1000)]
         reward_pipe = [0 for i in range(1000)]
         switch = [False, 0]
@@ -317,16 +319,18 @@ class SocialInfluence(mp.Process):
             ep_r = [0. for i in range(self.agent_num)]
             for step in range(1, 1001):
                 # print(step)
-                # if self.name == 'w00' and ep%10 == 0:
-                #     path = "/Users/xue/Desktop/temp/temp%d"%ep
-                #     if not os.path.exists(path):
-                #         os.mkdir(path)
-                #     self.env.render(path)
+                if self.name == 'w00' and ep%10 == 0:
+                    path = "/Users/xue/Desktop/record/record3/r%d"%ep
+                    if not os.path.exists(path):
+                        os.mkdir(path)
+                    self.env.render(path)
                 '''updater的seq_obs方法返回的是第i个agent对应的最新的时序序列，（RGB）格式基础上加seq'''
                 s_law = self.law.CNN_preprocess(self.updater.all_seq_states).permute(1,0,2)
                 a_law = self.law.choose_action(s_law)
+                if step % 500 == 0:
+                    print("a_law:",a_law)
                 # print(a_law)
-                s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.agent_num)]
+                s_pre = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num)]
                 a_preD = []
                 if self.take_inTurn:
                     for i in range(self.first_descision_num):
@@ -343,7 +347,7 @@ class SocialInfluence(mp.Process):
                 s = [self.lnet[i].CNN_preprocess(v_wrap(self.updater.seq_obs(i), device=self.device)) for i in range(self.first_descision_num, self.agent_num)]
                 s = self.modify_obs(None, seq_obs=s,)
 
-                a = [self.lnet[i].choose_action(s[i][:, None, :], True) for i in range(self.first_descision_num, self.agent_num)]
+                a = [self.lnet[i].choose_action(s[i].unsqueeze(1), True) for i in range(self.first_descision_num, self.agent_num)]
 
                 a = a_preD + a
                 a_int = [a[i][0] for i in range(self.agent_num)]
@@ -352,7 +356,9 @@ class SocialInfluence(mp.Process):
 
                 if self.glaw != None:
                     a_int = self.law.mask_action(a_law, a_prob)
-                    # print(a_int)
+
+                if step % 500 == 0:
+                    print('a_int:',a_int)
 
                 s_, r, done, _ = self.env.step(a_int,need_argmax=False)
                 ep_r = [ep_r[i] + r[i] for i in range(self.agent_num)]
@@ -382,7 +388,8 @@ class SocialInfluence(mp.Process):
                     buffer_r.append(r)
                 else:
                     _s = self.updater.get_next_seq_obs(s_, require_tensor=True)
-                    self.law.replay_buffer.push((s_law.detach(), self.law.CNN_preprocess(_s).permute(1,0,2).detach(), a_law, r, np.float(False)))
+                    # r = np.array([0.85*r[i]+0.15*(sum(r)-r[i]) for i in range(len(r))])
+                    self.law.replay_buffer.push((s_law.detach(), self.law.CNN_preprocess(_s).permute(1,0,2).detach(), a_law, sum(r), np.float(False)))
 
                 if switch[0] or self.glaw == None:
                     if step % 5 == 0:  # update global and assign to local net
@@ -481,6 +488,7 @@ class SocialInfluence(mp.Process):
             --a function that returns the sequential observation
         '''
         return seq_obs
+
 
 class IAC_RNN(IAC):
     '''

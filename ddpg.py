@@ -45,7 +45,7 @@ parser.add_argument('--render_interval', default=100, type=int) # after render_i
 parser.add_argument('--exploration_noise', default=0.1, type=float)
 parser.add_argument('--max_episode', default=100000, type=int) # num of games
 parser.add_argument('--print_log', default=5, type=int)
-parser.add_argument('--update_iteration', default=10, type=int)
+parser.add_argument('--update_iteration', default=2, type=int)
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -70,7 +70,7 @@ class Replay_buffer():
     https://github.com/openai/baselines/blob/master/baselines/deepq/replay_buffer.py
     Expects tuples of (state, next_state, action, reward, done)
     '''
-    def __init__(self, max_size=10):
+    def __init__(self, max_size=100):
         self.storage = []
         self.max_size = max_size
         self.ptr = 0
@@ -126,7 +126,7 @@ class Actor(nn.Module):
         self.max_action = max_action
 
     def CNN_preprocess(self, input):
-        x = self.conv(input)
+        x = torch.relu(self.conv(input))
         x = self.pool(x)
         x = x.flatten(start_dim=-3, end_dim=-1)
         return x
@@ -134,8 +134,8 @@ class Actor(nn.Module):
     def forward(self, x):
         x = F.relu(self.l1(x))
         x = F.relu(self.l2(x))
-        x, _ = self.LSTM(x)
-        x = torch.relu(x[-1, :, :])
+        _, (x, _) = self.LSTM(x)
+        x = torch.relu(x[0])
         x = torch.sigmoid(self.l_out(x))
         return x
 
@@ -187,20 +187,28 @@ class DDPG(object):
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-4)
 
-        self.critic = Critic(150, action_dim).to(device)
-        self.critic_target = Critic(150, action_dim).to(device)
+        self.critic = Critic(150*self.num_agents, action_dim*self.num_agents).to(device)
+        self.critic_target = Critic(150*self.num_agents, action_dim*self.num_agents).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-3)
         self.replay_buffer = Replay_buffer()
         # self.writer = SummaryWriter(directory)
 
+        self.lr_scheduler = {
+            'optC':torch.optim.lr_scheduler.StepLR(self.critic_optimizer, step_size=2000, gamma=0.99, last_epoch=-1),
+            'optA':torch.optim.lr_scheduler.StepLR(self.actor_optimizer, step_size=2000, gamma=0.99, last_epoch=-1)
+        }
         self.num_critic_update_iteration = 0
         self.num_actor_update_iteration = 0
         self.num_training = 0
 
-    def get_global_optimizer_network(self, opt, net):
+    def get_global_optimizer_network(self, opt, net, lr_scheduler):
         self.critic_optimizer = opt[0]
         self.actor_optimizer = opt[1]
+        self.lr_scheduler = {
+            'optC':lr_scheduler['optC'],
+            'optA':lr_scheduler['optA'],
+        }
         self.gactor = net[0]
         self.gcritic = net[1]
 
@@ -237,14 +245,17 @@ class DDPG(object):
             state = transform_state(state)
             next_state = transform_state(next_state)
 
-            actions = self.actor_target(next_state)
+            actions = self.actor_target(next_state).reshape(-1, self.num_agents*self.action_dim)
+            action = action.reshape(-1, self.num_agents*self.action_dim)
+            next_state_copy = next_state.reshape(self.seq_len, -1, 150*self.num_agents).clone()
+            state_copy = state.reshape(self.seq_len, -1, 150*self.num_agents).clone()
             # print()
             # next_state =
-            target_Q = self.critic_target(next_state, actions)
+            target_Q = self.critic_target(next_state_copy, actions)
             target_Q = reward + (args.gamma * target_Q).detach()
 
             # Get current Q estimate
-            current_Q = self.critic(state, action).to(self.device)
+            current_Q = self.critic(state_copy, action).to(self.device)
 
             # Compute critic loss
             critic_loss = F.mse_loss(current_Q, target_Q)
@@ -257,9 +268,10 @@ class DDPG(object):
                 gp._grad = lp.grad
             self.critic_optimizer.step()
             self.critic.load_state_dict(self.gcritic.state_dict())
+            self.lr_scheduler['optC'].step()
 
             # Compute actor loss
-            actor_loss = -self.critic(state, self.actor(state)).mean()
+            actor_loss = -self.critic(state_copy, self.actor(state).reshape(-1, self.num_agents*self.action_dim)).mean()
             # self.writer.add_scalar('Loss/actor_loss', actor_loss, global_step=self.num_actor_update_iteration)
 
             # Optimize the actor
@@ -269,6 +281,7 @@ class DDPG(object):
                 gp._grad = lp.grad
             self.actor_optimizer.step()
             self.actor.load_state_dict(self.gactor.state_dict())
+            self.lr_scheduler['optA'].step()
 
             # Update the frozen target models
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
@@ -283,7 +296,10 @@ class DDPG(object):
     def mask_action(self, mask, act):
         if not isinstance(mask, torch.Tensor):
             mask = torch.Tensor(mask)
-        masked_action = torch.cat([torch.mul(mask[i], act[i]) for i in range(len(act))])
+
+        test = [torch.mul(mask[i], act[i]) for i in range(len(act))]
+        test2 = [torch.mul(mask[i], act[i])[0].sum() for i in range(len(act))]
+        masked_action = torch.cat([torch.mul(mask[i], act[i])/torch.mul(mask[i], act[i])[0].sum() for i in range(len(act))])
         m = Categorical(masked_action)
         a = m.sample()
         return a.data.cpu().numpy()

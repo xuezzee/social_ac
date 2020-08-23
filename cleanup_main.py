@@ -41,7 +41,7 @@ model_name = "pg_social"
 file_name = "/Users/xue/Desktop/Social_Law/saved_weight/" + model_name
 save_eps = 10
 ifsave_model = True
-logger = Logger('./logstest')
+logger = Logger('./logs3')
 
 
 def A3C_main_multiProcess():
@@ -57,7 +57,7 @@ def A3C_main_multiProcess():
     global_net = [A3CNet(675*2, 8, device=device).to(device)]
     global_net = global_net + [A3CNet(675*2, 8, device=device).to(device) for i in range(n_agents)]
     optimizer = [torch.optim.Adam(global_net[i].parameters(), lr=0.001) for i in range(n_agents)]
-    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=20000, gamma=0.9, last_epoch=-1) for i in range(n_agents)]
+    scheduler_lr = [torch.optim.lr_scheduler.StepLR(optimizer[i],step_size=2000, gamma=0.99, last_epoch=-1) for i in range(n_agents)]
     envs = [env_wrapper(HarvestEnv(num_agents=n_agents),flatten=False) for i in range(n_workers)]
     workers = [SocialInfluence(
                    envs[worker],
@@ -81,7 +81,7 @@ def A3C_main_multiProcess():
     res = []
     while True:
         msg = [rec.recv() for rec in receiver]
-        # plot(msg, logger)
+        plot(msg, logger)
         # r = res_queue.get()
         # if r is not None:
         #     res.append(r)
